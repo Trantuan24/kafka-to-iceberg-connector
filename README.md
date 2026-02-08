@@ -1,6 +1,6 @@
 # Kafka-connect with Iceberg connector demo
 
-### run:
+### Run:
 - First start `iceberg-kafka-connect` standalone and all dependecies: `docker compose up`
 - Optionally create the Iceberg table using the Iceberg REST Catalog. 
 
@@ -56,7 +56,15 @@ curl http://localhost:8181/v1/namespaces/default_database/tables/test1
     - `SELECT * FROM iceberg.default_database.test1;`
     - you will see the `"id": 1, "data":"some data"` in the table.
 
-### docs:
+### Notes:
+The `inceberg-kafka-connect` dependencies were added from the [iceberg source repository](https://github.com/apache/iceberg). I had to manually build Iceberg and all it's dependencies. [This is according to the official documentation](https://iceberg.apache.org/docs/latest/kafka-connect/#installation). All the plugins are from this build.
+
+The connector compose file was ispired from the [official Iceberg repo](https://github.com/apache/iceberg/blob/main/kafka-connect/kafka-connect-runtime/docker/docker-compose.yml).
+
+Note I built Iceberg stable version `1.9.x`.
+
+
+### Docs:
 - https://iceberg.apache.org/docs/latest/kafka-connect/
 - https://github.com/apache/iceberg/blob/main/kafka-connect/kafka-connect-runtime/docker/docker-compose.yml
 - https://github.com/getindata/kafka-connect-iceberg-sink/blob/develop/README.md
