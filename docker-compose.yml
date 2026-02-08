@@ -57,23 +57,38 @@ services:
       - CATALOG_S3_ACCESS__KEY__ID=minioadmin
       - CATALOG_S3_SECRET__ACCESS__KEY=minioadmin
 
-  zookeeper-kafka:
-    image: 'confluentinc/cp-zookeeper:7.8.1'
-    container_name: 'zookeeper-kafka'
-    restart: 'unless-stopped'
-    ports:
-      - '2181:2181'
-    environment:
-      - 'ZOOKEEPER_CLIENT_PORT=2181'
-    healthcheck:
-      test: 'echo stat | nc localhost $$ZOOKEEPER_CLIENT_PORT'
+  # zookeeper-kafka:
+  #   image: 'confluentinc/cp-zookeeper:7.8.1'
+  #   container_name: 'zookeeper-kafka'
+  #   restart: 'unless-stopped'
+  #   ports:
+  #     - '2181:2181'
+  #   environment:
+  #     - 'ZOOKEEPER_CLIENT_PORT=2181'
+  #   healthcheck:
+  #     test: 'echo stat | nc localhost $$ZOOKEEPER_CLIENT_PORT'
+  create-topics:
+    image: confluentinc/cp-kafka:8.0.3
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint:
+      - bash
+      - -c
+      - |
+        echo "Waiting for Kafka to be ready..."
+        sleep 5
+        echo "Creating topics..."
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic test1 --partitions 1 --replication-factor 1
+        echo "Topics created successfully"
+        kafka-topics --bootstrap-server kafka:9092 --list      
   kafka:
     image: 'confluentinc/cp-kafka:8.0.3'
     hostname: kafka
     container_name: kafka
   #    restart: 'unless-stopped'
-    depends_on:
-      - 'zookeeper-kafka'
+    # depends_on:
+    #   - 'zookeeper-kafka'
     ports:
       - 9092:9092
       - 29092:29092
@@ -103,6 +118,7 @@ services:
       - kafka
       - iceberg
       - minio
+      - create-topics
     hostname: connect
     ports:
       - 8083:8083
@@ -111,24 +127,6 @@ services:
       # - ./plugins/:/usr/local/share/kafka/plugins/
       - ./configs:/test/configs
     environment:
-      # CONNECT_REST_ADVERTISED_HOST_NAME: localhost
-      # CONNECT_REST_PORT: 8083
-      # CONNECT_GROUP_ID: kc
-      # CONNECT_CONFIG_STORAGE_TOPIC: kc-config
-      # CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
-      # CONNECT_OFFSET_STORAGE_TOPIC: kc-offsets
-      # CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
-      # CONNECT_STATUS_STORAGE_TOPIC: kc-storage
-      # CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
-      # CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      # CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: false
-      # CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      # CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: false
-      # CONNECT_PLUGIN_PATH: /usr/local/share/kafka/plugins/
-      # CONNECT_BOOTSTRAP_SERVERS: kafka:9092
-      # CONNECT_OFFSET_FLUSH_INTERVAL_MS: 500
-
-
       CONNECT_REST_ADVERTISED_HOST_NAME: localhost
       CONNECT_REST_PORT: 8083
       CONNECT_GROUP_ID: kc
