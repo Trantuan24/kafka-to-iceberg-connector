@@ -1,20 +1,3 @@
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
-#
-#   http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
-
 volumes:
   data: {}
 
@@ -57,16 +40,6 @@ services:
       - CATALOG_S3_ACCESS__KEY__ID=minioadmin
       - CATALOG_S3_SECRET__ACCESS__KEY=minioadmin
 
-  # zookeeper-kafka:
-  #   image: 'confluentinc/cp-zookeeper:7.8.1'
-  #   container_name: 'zookeeper-kafka'
-  #   restart: 'unless-stopped'
-  #   ports:
-  #     - '2181:2181'
-  #   environment:
-  #     - 'ZOOKEEPER_CLIENT_PORT=2181'
-  #   healthcheck:
-  #     test: 'echo stat | nc localhost $$ZOOKEEPER_CLIENT_PORT'
   create-topics:
     image: confluentinc/cp-kafka:8.0.3
     depends_on:
@@ -87,8 +60,6 @@ services:
     hostname: kafka
     container_name: kafka
   #    restart: 'unless-stopped'
-    # depends_on:
-    #   - 'zookeeper-kafka'
     ports:
       - 9092:9092
       - 29092:29092
@@ -124,7 +95,6 @@ services:
       - 8083:8083
     volumes:
       - ./plugins:/test/kafka-connect
-      # - ./plugins/:/usr/local/share/kafka/plugins/
       - ./configs:/test/configs
     environment:
       CONNECT_REST_ADVERTISED_HOST_NAME: localhost

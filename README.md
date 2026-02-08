@@ -59,9 +59,9 @@ curl http://localhost:8181/v1/namespaces/default_database/tables/test1
 ### Notes:
 The `inceberg-kafka-connect` dependencies were added from the [iceberg source repository](https://github.com/apache/iceberg). I had to manually build Iceberg and all it's dependencies. [This is according to the official documentation](https://iceberg.apache.org/docs/latest/kafka-connect/#installation). All the plugins are from this build.
 
-The connector compose file was ispired from the [official Iceberg repo](https://github.com/apache/iceberg/blob/main/kafka-connect/kafka-connect-runtime/docker/docker-compose.yml).
+The connector compose file was inspired from the [official Iceberg repo](https://github.com/apache/iceberg/blob/main/kafka-connect/kafka-connect-runtime/docker/docker-compose.yml) but it's not a copy.
 
-Note I built Iceberg stable version `1.9.x`.
+Note I built Iceberg stable version: `1.9.x`.
 
 
 ### Docs:
