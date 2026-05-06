@@ -1,7 +1,41 @@
 volumes:
   data: {}
+  postgres-data: {}
 
 services:
+  # PostgreSQL for Hive Metastore
+  postgres:
+    image: postgres:15
+    hostname: postgres
+    environment:
+      - POSTGRES_USER=hive
+      - POSTGRES_PASSWORD=hive
+      - POSTGRES_DB=metastore
+    ports:
+      - 5432:5432
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  # Hive Metastore
+  hive-metastore:
+    build:
+      context: .
+      dockerfile: Dockerfile.hive
+    hostname: hive-metastore
+    depends_on:
+      - postgres
+      - minio
+    ports:
+      - 9083:9083
+    volumes:
+      - ./hive-site.xml:/opt/hive/conf/hive-site.xml
+    environment:
+      - SERVICE_NAME=metastore
+      - DB_DRIVER=postgres
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - AWS_REGION=us-east-1
+
   minio:
     image: minio/minio
     hostname: minio
@@ -23,23 +57,6 @@ services:
       - data:/data
     entrypoint: mc mb /data/bucket
 
-  iceberg:
-    image: apache/iceberg-rest-fixture
-    depends_on:
-      - create-bucket
-    hostname: iceberg
-    ports:
-      - 8181:8181
-    environment:
-      - AWS_REGION=us-east-1
-      - CATALOG_WAREHOUSE=s3://bucket/warehouse/
-      - CATALOG_URI=jdbc:sqlite:file:/tmp/iceberg_rest_mode=memory
-      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
-      - CATALOG_S3_ENDPOINT=http://minio:9000
-      - CATALOG_S3_PATH__STYLE__ACCESS=true
-      - CATALOG_S3_ACCESS__KEY__ID=minioadmin
-      - CATALOG_S3_SECRET__ACCESS__KEY=minioadmin
-
   create-topics:
     image: confluentinc/cp-kafka:8.0.3
     depends_on:
@@ -53,13 +70,15 @@ services:
         sleep 5
         echo "Creating topics..."
         kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic test1 --partitions 1 --replication-factor 1
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic y_te_831 --partitions 1 --replication-factor 1
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic tram_quan_trac --partitions 1 --replication-factor 1
         echo "Topics created successfully"
-        kafka-topics --bootstrap-server kafka:9092 --list      
+        kafka-topics --bootstrap-server kafka:9092 --list
+        
   kafka:
     image: 'confluentinc/cp-kafka:8.0.3'
     hostname: kafka
     container_name: kafka
-  #    restart: 'unless-stopped'
     ports:
       - 9092:9092
       - 29092:29092
@@ -83,21 +102,23 @@ services:
     healthcheck:
       test: [ "CMD", "nc", "-z", "localhost", "9092" ]
 
+  # Kafka Connect in DISTRIBUTED mode (manage connectors via REST API)
   connect:
-    image: confluentinc/cp-kafka-connect:8.0.3
+    build:
+      context: .
+      dockerfile: Dockerfile.connect
     depends_on:
       - kafka
-      - iceberg
+      - hive-metastore
       - minio
       - create-topics
     hostname: connect
     ports:
       - 8083:8083
     volumes:
-      - ./plugins:/test/kafka-connect
       - ./configs:/test/configs
     environment:
-      CONNECT_REST_ADVERTISED_HOST_NAME: localhost
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect
       CONNECT_REST_PORT: 8083
       CONNECT_GROUP_ID: kc
       CONNECT_CONFIG_STORAGE_TOPIC: kc-config
@@ -107,31 +128,33 @@ services:
       CONNECT_STATUS_STORAGE_TOPIC: kc-storage
       CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
       CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: false
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
       CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: false
-      CONNECT_PLUGIN_PATH: /test/kafka-connect
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
       CONNECT_BOOTSTRAP_SERVERS: kafka:9092
-      CONNECT_OFFSET_FLUSH_INTERVAL_MS: 500
-      # CONNECT_LOG4J_ROOT_LOGLEVEL: DEBUG
-      # CONNECT_LOG4J_LOGGERS: org.apache.kafka.connect=DEBUG,org.apache.iceberg=DEBUG
+      CONNECT_OFFSET_FLUSH_INTERVAL_MS: 10000
+      KAFKA_HEAP_OPTS: "-Xms512M -Xmx4G"
       AWS_REGION: us-east-1
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
+      # Enable DEBUG logging for Iceberg connector
+      CONNECT_LOG4J_LOGGERS: "org.apache.iceberg.connect=DEBUG,com.example.kafka.connect.smt=DEBUG"
     entrypoint:
       - bash
       - -c
       - |
-        echo "Starting connector ..."
-        ls -la /test/kafka-connect
-        ls -la /test/configs
-        connect-standalone /test/configs/connect-standalone.properties /test/configs/sink.iceberg.properties
-      # export KAFKA_LOG4J_OPTS="-Dlog4j.configuration=file:/etc/kafka/connect-log4j.properties"
+        echo "Waiting for Hive Metastore to be ready..."
+        sleep 30
+        echo "Starting Kafka Connect in DISTRIBUTED mode..."
+        ls -la /usr/share/java/iceberg-kafka-connect/ || echo "WARNING: iceberg-kafka-connect dir not found"
+        ls -la /usr/share/java/custom-smt/ || echo "WARNING: custom-smt dir not found"
+        /etc/confluent/docker/run
 
   trino:
     image: trinodb/trino:468
     depends_on:
-      - iceberg
+      - hive-metastore
       - minio
     hostname: trino
     ports:

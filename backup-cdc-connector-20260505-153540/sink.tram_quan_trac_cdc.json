@@ -1,0 +1,30 @@
+{
+  "name": "sink.tram_quan_trac_cdc",
+  "config": {
+    "connector.class": "com.example.kafka.connect.iceberg.VersionControlIcebergSinkConnector",
+    "tasks.max": "1",
+    "topics": "tram_quan_trac",
+    
+    "iceberg.table.name": "default.tram_quan_trac_cdc",
+    "iceberg.catalog.type": "hive",
+    "iceberg.catalog.uri": "thrift://hive-metastore:9083",
+    "iceberg.catalog.warehouse": "s3a://bucket/warehouse/",
+    
+    "iceberg.catalog.s3.endpoint": "http://minio:9000",
+    "iceberg.catalog.s3.path-style-access": "true",
+    "iceberg.catalog.s3.access-key-id": "minioadmin",
+    "iceberg.catalog.s3.secret-access-key": "minioadmin",
+    "iceberg.catalog.s3.region": "us-east-1",
+    
+    "consumer.max.poll.records": "50000",
+    "offset.flush.interval.ms": "30000",
+    
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+    
+    "errors.tolerance": "none",
+    "errors.log.enable": "true",
+    "errors.log.include.messages": "true"
+  }
+}
