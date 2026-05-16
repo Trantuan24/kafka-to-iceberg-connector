@@ -134,6 +134,8 @@ Chi tiết: xem `TOPIC-TABLE-MAPPING.md`
 
 ## Rebuild khi sửa code
 
+> **LƯU Ý:** Khi clone repo mới về, KHÔNG cần build Gradle. JARs đã có sẵn trong `plugins/`. Chỉ cần `docker compose build` → `docker compose up -d` là chạy. Phần dưới đây chỉ dùng khi bạn SỬA source code.
+
 ### Sửa Custom SMT:
 
 ```powershell
