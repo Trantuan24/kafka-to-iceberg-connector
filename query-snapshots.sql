@@ -1,0 +1,1 @@
+SELECT snapshot_id, committed_at, summary['pipeline.snapshot-uuid'] AS lineage_uuid, summary['pipeline.topic'] AS topic, summary['pipeline.source-type'] AS source_type FROM iceberg.default."qtmt_tramquantrac$snapshots" ORDER BY committed_at DESC LIMIT 1;

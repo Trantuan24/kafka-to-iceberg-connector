@@ -1,0 +1,28 @@
+{
+  "data": [
+    {
+      "MaTramQuanTrac": "TR001",
+      "LoaiHinhQuanTrac": "Khí",
+      "ThongSo": "PM2.5",
+      "NamQuanTrac": 2026,
+      "ThangQuanTrac": 5,
+      "NgayQuanTrac": 5,
+      "KetQuaQuanTracTrungBinh01gio": 35.2,
+      "KetQuaQuanTracTrungBinh24gio": 40.1,
+      "KetQuaQuanTracTrungBinhThang": 38.5,
+      "SoGioVuotQCVN": 5,
+      "TyLeVuotQCVN_1h": 12.5,
+      "SoNgayVuotQCVN": 2,
+      "TyLeNgayVuotQCVN": 6.7,
+      "QuyChuanMoiTruong": "QCVN 05:2013/BTNMT",
+      "TrangThaiDo": 1,
+      "created_at": "2026-05-05T08:00:00Z",
+      "updated_at": "2026-05-05T10:15:00Z"
+    }
+  ],
+  "length": 1,
+  "key": "MaTramQuanTrac",
+  "type": "INSERT",
+  "version": 1,
+  "ngay_cap_nhat": "05/05/2026-10:15"
+}

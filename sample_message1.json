@@ -1,0 +1,39 @@
+{
+  "data": [
+    {
+      "MaTram": "TRAM001",
+      "TenTram": "Trạm quan trắc Hà Nội 1",
+      "MoTa": "Trạm giám sát không khí",
+      "DiaChiChiTiet": "Cầu Giấy, Hà Nội",
+      "MaXa": "XA001",
+      "TenXa": "Cầu Giấy",
+      "MaTinh": "01",
+      "TenTinh": "Hà Nội",
+      "KinhDo": 105.8,
+      "ViDo": 21.03,
+      "LoaiHinhQuanTrac": "KHONGKHI",
+      "ThongSo": "SO3, NO3",
+      "DonViQuanLyVanHanh": "Sở TNMT Hà Nội"
+    },
+    {
+      "MaTram": "TRAM002",
+      "TenTram": "Trạm quan trắc Hải Phòng",
+      "MoTa": "Trạm nước mặt",
+      "DiaChiChiTiet": "Lê Chân, Hải Phòng",
+      "MaXa": "XA002",
+      "TenXa": "Lê Chân",
+      "MaTinh": "31",
+      "TenTinh": "Hải Phòng",
+      "KinhDo": 106.68,
+      "ViDo": 20.85,
+      "LoaiHinhQuanTrac": "NUOCMAT",
+      "ThongSo": "pN, DH",
+      "DonViQuanLyVanHanh": "Sở TNMT Hải Phòng"
+    }
+  ],
+  "length": 2,
+  "key": "MaTram",
+  "type": "UPDATE",
+  "version": 3,
+  "ngay_cap_nhat": "04/05/2026-10:15"
+}

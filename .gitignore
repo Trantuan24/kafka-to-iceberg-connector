@@ -1,0 +1,16 @@
+# Gradle
+.gradle/
+build/
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Docker volumes
+data/
+
+# Temp
+*.log
+__pycache__/

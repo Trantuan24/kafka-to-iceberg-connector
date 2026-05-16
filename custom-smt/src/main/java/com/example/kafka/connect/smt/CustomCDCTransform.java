@@ -13,6 +13,8 @@ import org.apache.kafka.connect.transforms.Transformation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -56,28 +58,45 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
     private static final Logger log = LoggerFactory.getLogger(CustomCDCTransform.class);
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
-    // Schema for transformed record (Phase 2: CDC mode)
+    // Config keys
+    private static final String ICEBERG_NAMESPACE_CONFIG = "iceberg.namespace";
+    private static final String ICEBERG_NAMESPACE_DEFAULT = "default";
+    private static final String TOPIC_TABLE_MAP_CONFIG = "topic.table.map";
+
+    // Schema for transformed record
     private Schema transformedSchema;
-    private Schema cdcSchema;
+
+    // Configurable namespace for table routing (fallback)
+    private String icebergNamespace = ICEBERG_NAMESPACE_DEFAULT;
+
+    // Custom topic → table mapping (topic → "namespace.table")
+    private final java.util.Map<String, String> topicTableMap = new HashMap<>();
 
     /**
      * In-memory version cache: dedup_key -> max version seen.
      * Prevents out-of-order / stale records from overwriting newer data in Iceberg.
-     *
-     * Key   : dedup_key value (e.g. "TRAM001")
-     * Value : highest version number processed for that key
-     *
-     * Limitation: cache is lost on SMT/connector restart.
-     * On cold start the first record for each key will always pass through.
      */
     private final ConcurrentHashMap<String, Long> versionCache = new ConcurrentHashMap<>();
 
     @Override
     public void configure(Map<String, ?> configs) {
-        cdcSchema = SchemaBuilder.struct()
-            .name("com.example.cdc.CdcStruct")
-            .field("op", Schema.OPTIONAL_STRING_SCHEMA)
-            .build();
+        // Read configurable namespace (default "default")
+        Object nsObj = configs.get(ICEBERG_NAMESPACE_CONFIG);
+        if (nsObj != null && !nsObj.toString().isEmpty()) {
+            icebergNamespace = nsObj.toString();
+        }
+
+        // Read topic→table mapping: "topic1:ns.table1,topic2:ns.table2"
+        Object mapObj = configs.get(TOPIC_TABLE_MAP_CONFIG);
+        if (mapObj != null && !mapObj.toString().isEmpty()) {
+            for (String entry : mapObj.toString().split(",")) {
+                String[] parts = entry.trim().split(":");
+                if (parts.length == 2) {
+                    topicTableMap.put(parts[0].trim(), parts[1].trim());
+                }
+            }
+            log.info("Topic-table mapping loaded: {}", topicTableMap);
+        }
 
         transformedSchema = SchemaBuilder.struct()
             .name("com.example.cdc.TransformedRecord")
@@ -89,11 +108,11 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
             .field("key", Schema.OPTIONAL_STRING_SCHEMA)
             .field("ngay_cap_nhat", Schema.OPTIONAL_STRING_SCHEMA)
             .field("length", Schema.OPTIONAL_STRING_SCHEMA)
-            .field("_cdc", cdcSchema)
+            .field("iceberg_table", Schema.OPTIONAL_STRING_SCHEMA)
             .field("_cdc_op", Schema.OPTIONAL_STRING_SCHEMA)
             .build();
 
-        log.info("CustomCDCTransform configured. Phase 2: upsert mode, 10 fields output.");
+        log.info("CustomCDCTransform configured. 10 fields output. namespace={}", icebergNamespace);
     }
 
     @Override
@@ -168,7 +187,7 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
             // -------------------------------------------------------
 
             // Transform to Iceberg-compatible format
-            Struct transformed = transformValue(id, value);
+            Struct transformed = transformValue(id, value, record.topic());
 
             log.info("CustomCDCTransform output: id={}, dedup_key={}, type={}, version={}",
                 transformed.get("id"), transformed.get("dedup_key"), transformed.get("type"),
@@ -197,7 +216,7 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
         }
     }
 
-    private Struct transformValue(String id, Map<String, Object> value) throws Exception {
+    private Struct transformValue(String id, Map<String, Object> value, String topic) throws Exception {
         // Extract fields from CDC message
         String businessKey = getStringField(value, "key");
         Object dataObj = value.get("data");
@@ -220,26 +239,30 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
             throw new DataException("Missing required field 'key' in CDC message");
         }
 
-        // Extract dedup_key from data[0][businessKey]
+        // Extract dedup_key: collect key value from ALL items in data[], sort, join with ||
+        // Sort ensures order-independence: [{TRAM002},{TRAM001}] == [{TRAM001},{TRAM002}]
         String dedupKey = null;
         if (dataObj instanceof List) {
             List<?> dataList = (List<?>) dataObj;
             if (dataList.isEmpty()) {
                 throw new DataException("Field 'data' is an empty list, cannot extract dedup_key");
             }
-            if (dataList.size() > 1) {
-                log.warn("Field 'data' has multiple items. Using the first item for dedup_key.");
-            }
-            Object firstItem = dataList.get(0);
-            if (firstItem instanceof Map) {
-                Object keyVal = ((Map<?, ?>) firstItem).get(businessKey);
-                if (keyVal != null) {
-                    dedupKey = keyVal.toString();
+            List<String> keyValues = new ArrayList<>();
+            for (Object item : dataList) {
+                if (item instanceof Map) {
+                    Object keyVal = ((Map<?, ?>) item).get(businessKey);
+                    if (keyVal != null) {
+                        keyValues.add(keyVal.toString());
+                    }
                 }
+            }
+            if (!keyValues.isEmpty()) {
+                Collections.sort(keyValues);           // sort alphabetically
+                dedupKey = String.join("||", keyValues); // join: "TRAM001||TRAM002"
             }
         }
         if (dedupKey == null) {
-            throw new DataException("Cannot extract dedup_key from data[0] using key field: " + businessKey);
+            throw new DataException("Cannot extract dedup_key from data[] using key field: " + businessKey);
         }
 
         // Stringify data[] to record (handles both List and other JSON types)
@@ -256,7 +279,7 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
         // Keep length as STRING (matching table schema VARCHAR)
         String length = lengthObj != null ? lengthObj.toString() : "0";
 
-        // Map type to _cdc.op
+        // Map type to _cdc_op
         String cdcOp = "I"; // Default to Insert
         switch (type.toUpperCase()) {
             case "INSERT": cdcOp = "I"; break;
@@ -264,10 +287,18 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
             case "DELETE": cdcOp = "D"; break;
             default: log.warn("Unknown type: {}, defaulting to 'I'", type);
         }
-        Struct cdcStruct = new Struct(cdcSchema);
-        cdcStruct.put("op", cdcOp);
 
-        // Build transformed struct - 9 fields (Phase 2)
+        // Derive iceberg_table: check map first, fallback to auto-derive
+        // Map: topic → "namespace.table" (from config)
+        // Fallback: namespace + "." + topic.replace("-", "_")
+        String icebergTable;
+        if (topicTableMap.containsKey(topic)) {
+            icebergTable = topicTableMap.get(topic);
+        } else {
+            icebergTable = icebergNamespace + "." + (topic != null ? topic.replace("-", "_") : "unknown");
+        }
+
+        // Build transformed struct - 10 fields
         Struct transformed = new Struct(transformedSchema);
         transformed.put("id", id);
         transformed.put("dedup_key", dedupKey);
@@ -277,16 +308,21 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
         transformed.put("key", businessKey);
         transformed.put("ngay_cap_nhat", ngayCapNhat);
         transformed.put("length", length);
-        transformed.put("_cdc", cdcStruct);
+        transformed.put("iceberg_table", icebergTable);
         transformed.put("_cdc_op", cdcOp);
 
         return transformed;
     }
 
     /**
-     * Extract dedup_key from CDC message without full transform.
+     * Extract composite dedup_key from CDC message without full transform.
+     * Collects key values from ALL items in data[], sorts them, joins with "||".
      * Used by the version filter before full processing.
      * Returns null if extraction fails (record will be passed through without filtering).
+     *
+     * Example: data=[{MaTram:"TRAM002"},{MaTram:"TRAM001"}], key="MaTram"
+     *   → sorted: ["TRAM001","TRAM002"]
+     *   → result: "TRAM001||TRAM002"
      */
     private String extractDedupKey(Map<String, Object> value) {
         try {
@@ -296,10 +332,19 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
             if (!(dataObj instanceof List)) return null;
             List<?> dataList = (List<?>) dataObj;
             if (dataList.isEmpty()) return null;
-            Object firstItem = dataList.get(0);
-            if (!(firstItem instanceof Map)) return null;
-            Object keyVal = ((Map<?, ?>) firstItem).get(businessKey);
-            return keyVal != null ? keyVal.toString() : null;
+
+            List<String> keyValues = new ArrayList<>();
+            for (Object item : dataList) {
+                if (item instanceof Map) {
+                    Object keyVal = ((Map<?, ?>) item).get(businessKey);
+                    if (keyVal != null) {
+                        keyValues.add(keyVal.toString());
+                    }
+                }
+            }
+            if (keyValues.isEmpty()) return null;
+            Collections.sort(keyValues);
+            return String.join("||", keyValues);
         } catch (Exception e) {
             log.warn("extractDedupKey failed: {}", e.getMessage());
             return null;

@@ -1,0 +1,76 @@
+buildscript {
+  repositories {
+    mavenCentral()
+  }
+  dependencies {
+    classpath(libs.spotless.gradle)
+    classpath(libs.palantir.gradle)
+  }
+}
+
+plugins {
+  alias(libs.plugins.nebula.release)
+}
+
+subprojects {
+  apply plugin: "java"
+  apply plugin: "com.diffplug.spotless"
+  apply plugin: "com.palantir.baseline-checkstyle"
+  apply plugin: "maven-publish"
+
+  group "io.tabular.connect"
+
+  repositories {
+    mavenCentral()
+    maven {
+      url = "https://tabular-repository-public.s3.amazonaws.com/releases"
+    }
+  }
+
+  sourceCompatibility = "1.8"
+  targetCompatibility = "1.8"
+
+  test {
+    useJUnitPlatform()
+  }
+
+  jar {
+    manifest {
+      attributes(
+          "Implementation-Title": project.name,
+          "Implementation-Version": project.version,
+          "Implementation-Vendor": "Tabular Technologies, Inc.",
+          "Build-Timestamp": java.time.Instant.now().toString(),
+          "Build-JDK": "${System.properties["java.version"]} (${System.properties["java.vendor"]} ${System.properties["java.vm.version"]})",
+          "Build-OS": "${System.properties["os.name"]} ${System.properties["os.arch"]} ${System.properties["os.version"]}",
+      )
+    }
+  }
+
+  spotless {
+    java {
+      target project.fileTree(project.rootDir) {
+        include 'src/**/*.java'
+        exclude 'src/*/io/debezium/**/*.java'
+      }
+      googleJavaFormat("1.7")
+      removeUnusedImports()
+      licenseHeaderFile "$rootDir/header.txt"
+    }
+  }
+
+  checkstyle {
+    toolVersion '9.3'
+  }
+
+  publishing {
+    repositories {
+      maven {
+        authentication {
+          awsIm(AwsImAuthentication)
+        }
+        url = "s3://tabular-repository-public/releases"
+      }
+    }
+  }
+}

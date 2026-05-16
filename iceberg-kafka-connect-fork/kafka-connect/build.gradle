@@ -1,0 +1,32 @@
+dependencies {
+  implementation project(":iceberg-kafka-connect-events")
+  implementation libs.bundles.iceberg
+  implementation libs.bundles.jackson
+  implementation libs.avro
+  implementation libs.slf4j
+  compileOnly libs.bundles.kafka.connect
+
+  testImplementation(testFixtures(project(":iceberg-kafka-connect-events")))
+  testImplementation libs.hadoop.client
+
+  testImplementation libs.junit.api
+  testImplementation libs.junit.params
+  testRuntimeOnly libs.junit.engine
+
+  testImplementation libs.mockito
+  testImplementation libs.assertj
+
+  testImplementation 'ch.qos.logback:logback-classic:1.5.3'
+}
+
+configurations {
+  testImplementation.extendsFrom compileOnly
+}
+
+publishing {
+  publications {
+    mavenJava(MavenPublication) {
+      from components.java
+    }
+  }
+}
