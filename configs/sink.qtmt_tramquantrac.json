@@ -1,21 +1,17 @@
-// File connector map 1 connector cho 1 topic -> 1 table
 {
-  "name": "sink.tram_quan_trac_cdc_v2",
+  "name": "sink-qtmt-tramquantrac",
   "config": {
     "connector.class": "io.tabular.iceberg.connect.IcebergSinkConnector",
     "tasks.max": "1",
-    "topics": "tram_quan_trac",
-
-    "iceberg.tables": "default.tram_quan_trac_cdc_v2",
-    "iceberg.tables.auto-create-enabled": "true",
+    "topics": "qtmt-tramquantrac",
+    "iceberg.tables.dynamic-enabled": "true",
+    "iceberg.tables.route-field": "iceberg_table",
+    "iceberg.tables.auto-create-enabled": "false",
     "iceberg.tables.evolve-schema-enabled": "true",
     "iceberg.tables.schema-force-optional": "true",
-
     "iceberg.tables.default-id-columns": "dedup_key",
     "iceberg.tables.cdc-field": "_cdc_op",
     "iceberg.tables.upsert-mode-enabled": "false",
-
-
     "iceberg.catalog": "default",
     "iceberg.catalog.type": "hive",
     "iceberg.catalog.uri": "thrift://hive-metastore:9083",
@@ -26,17 +22,15 @@
     "iceberg.catalog.s3.access-key-id": "minioadmin",
     "iceberg.catalog.s3.secret-access-key": "minioadmin",
     "iceberg.catalog.client.region": "us-east-1",
-
     "iceberg.control.commit.interval-ms": "10000",
     "iceberg.control.commit.timeout-ms": "30000",
-
     "transforms": "customCdc",
     "transforms.customCdc.type": "com.example.kafka.connect.smt.CustomCDCTransform",
-
+    "transforms.customCdc.topic.table.map": "qtmt-tramquantrac:def.abc",
+    "typeingest": "API",
     "value.converter": "org.apache.kafka.connect.json.JsonConverter",
     "value.converter.schemas.enable": "false",
     "key.converter": "org.apache.kafka.connect.storage.StringConverter",
-
     "consumer.override.auto.offset.reset": "earliest",
     "errors.tolerance": "none",
     "errors.log.enable": "true",

@@ -92,8 +92,6 @@ public class IcebergSinkConfig extends AbstractConfig {
   private static final String COMMIT_THREADS_PROP = "iceberg.control.commit.threads";
   private static final String CONNECT_GROUP_ID_PROP = "iceberg.connect.group-id";
   private static final String HADDOP_CONF_DIR_PROP = "iceberg.hadoop-conf-dir";
-  private static final String PIPELINE_SOURCE_TYPE_PROP = "pipeline.source-type";
-  private static final String PIPELINE_SOURCE_TYPE_DEFAULT = "API";
 
   private static final String NAME_PROP = "name";
   private static final String BOOTSTRAP_SERVERS_PROP = "bootstrap.servers";
@@ -240,11 +238,11 @@ public class IcebergSinkConfig extends AbstractConfig {
         Importance.MEDIUM,
         "Coordinator threads to use for table commits, default is (cores * 2)");
     configDef.define(
-        PIPELINE_SOURCE_TYPE_PROP,
+        "typeingest",
         Type.STRING,
-        PIPELINE_SOURCE_TYPE_DEFAULT,
-        Importance.LOW,
-        "Source type label injected into Iceberg snapshot summary for lineage (default: API)");
+        "",
+        Importance.MEDIUM,
+        "Ingestion type (API, CDC, FILE) to inject into Iceberg snapshot metadata");
     return configDef;
   }
 
@@ -304,10 +302,6 @@ public class IcebergSinkConfig extends AbstractConfig {
     return originalProps.get(NAME_PROP);
   }
 
-  /** Returns the pipeline source-type label for snapshot metadata (default: "API"). */
-  public String pipelineSourceType() {
-    return getString(PIPELINE_SOURCE_TYPE_PROP);
-  }
 
   public String transactionalSuffix() {
     // this is for internal use and is not part of the config definition...

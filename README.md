@@ -44,18 +44,19 @@ docker exec kafka kafka-topics --bootstrap-server kafka:9092 --list
 docker exec iceberg-kafka-connect-demo-trino-1 trino --execute "SELECT 1"
 ```
 
-### Bước 3: Deploy connector
+### Bước 3: Tạo table và deploy connector
 
 ```powershell
-# Tạo namespace custom (nếu dùng topic.table.map trỏ vào namespace khác default)
+# Tạo namespace + table
 docker exec iceberg-kafka-connect-demo-trino-1 trino --execute "CREATE SCHEMA IF NOT EXISTS iceberg.def"
+docker exec iceberg-kafka-connect-demo-trino-1 trino --execute "CREATE TABLE IF NOT EXISTS iceberg.def.abc (id VARCHAR, dedup_key VARCHAR, record VARCHAR, version BIGINT, type VARCHAR, key VARCHAR, ngay_cap_nhat VARCHAR, length VARCHAR) WITH (format = 'PARQUET')"
 
-# Deploy
-$body = Get-Content "configs\sink.tram_quan_trac_cdc_v2.json" -Raw
+# Deploy connector
+$body = Get-Content "configs\sink.qtmt_tramquantrac.json" -Raw
 Invoke-RestMethod -Method Post "http://localhost:8083/connectors" -ContentType "application/json" -Body $body
 
 # Kiểm tra status (connector + task phải RUNNING)
-Invoke-RestMethod "http://localhost:8083/connectors/sink.sla-group/status" | ConvertTo-Json -Depth 3
+Invoke-RestMethod "http://localhost:8083/connectors/sink-qtmt-tramquantrac/status" | ConvertTo-Json -Depth 3
 ```
 
 ### Bước 4: Gửi test messages
@@ -64,71 +65,56 @@ Invoke-RestMethod "http://localhost:8083/connectors/sink.sla-group/status" | Con
 python test.py
 ```
 
-Test gửi 17 messages trong 3 batches, đủ INSERT/UPDATE/DELETE/Stale DROP trên cả 2 topics.
+Test gửi 9 messages trong 3 batches (INSERT/UPDATE/DELETE/Stale DROP) trên topic `qtmt-tramquantrac`.
 
-### Bước 5: Đợi commit (15s) rồi verify data
+### Bước 5: Verify data (đợi 15s sau khi test xong)
 
 ```powershell
-# Table 1: auto-derive (default.qtmt_tramquantrac)
-docker exec iceberg-kafka-connect-demo-trino-1 trino --execute "SELECT dedup_key, type, version FROM iceberg.default.qtmt_tramquantrac ORDER BY dedup_key"
-
-# Table 2: custom map (def.abc)
 docker exec iceberg-kafka-connect-demo-trino-1 trino --execute "SELECT dedup_key, type, version FROM iceberg.def.abc ORDER BY dedup_key"
-
-# Kiểm tra schema (phải là 8 fields nghiệp vụ, không có _cdc_op, iceberg_table, source_type)
-docker exec iceberg-kafka-connect-demo-trino-1 trino --execute "DESCRIBE iceberg.default.qtmt_tramquantrac"
 ```
 
-Kết quả mong đợi:
+Kết quả mong đợi (4 rows):
 ```
-default.qtmt_tramquantrac: TRAM001||TRAM002 v2, TRAM003 v1, TRAM005||TRAM006 v2, TRAM007||TRAM008 v1
-def.abc: TR001 v2, TR002 v1, TR003 v2, TR004 v1
+TRAM001||TRAM002  UPDATE  2
+TRAM003           INSERT  1
+TRAM005||TRAM006  UPDATE  2
+TRAM007||TRAM008  INSERT  1
 ```
-
-Schema: `id, dedup_key, record, version, type, key, ngay_cap_nhat, length` (8 fields)
 
 ### Bước 6: Verify snapshot metadata (lineage)
 
 ```powershell
-# Tạo file query
-@"
-SELECT snapshot_id, committed_at,
-  summary['pipeline.snapshot-uuid'] AS lineage_uuid,
-  summary['pipeline.topic'] AS topic,
-  summary['pipeline.source-type'] AS source_type
-FROM iceberg.default."qtmt_tramquantrac`$snapshots"
-ORDER BY committed_at DESC LIMIT 3;
-"@ | Set-Content -Path "query-snapshots.sql"
-
-# Copy vào Trino và chạy
-docker cp "query-snapshots.sql" "iceberg-kafka-connect-demo-trino-1:/tmp/q.sql"
-docker exec iceberg-kafka-connect-demo-trino-1 trino -f /tmp/q.sql
+docker cp query-snapshots.sql iceberg-kafka-connect-demo-trino-1:/tmp/qs.sql
+docker exec iceberg-kafka-connect-demo-trino-1 trino -f /tmp/qs.sql
 ```
 
 Mong đợi mỗi snapshot có:
 ```
-pipeline.snapshot-uuid = UUID (unique per table per commit)
-pipeline.topic         = qtmt_tramquantrac
-pipeline.source-type   = API
+connector.name = sink-qtmt-tramquantrac
+typeingest     = API
 ```
+
+### Bước 7: Test checkpoint recovery (optional)
+
+```powershell
+python test_checkpoint.py
+```
+
+Test tự động: kill connector → gửi message khi down → restart → verify không mất data.
 
 ---
 
 ## Topic → Table Mapping
 
-Config trong `configs/sink.tram_quan_trac_cdc_v2.json`:
+Config trong `configs/sink.qtmt_tramquantrac.json`:
 
 ```json
-"transforms.customCdc.iceberg.namespace": "default",
-"transforms.customCdc.topic.table.map": "qtmt-quantrackhithai:def.abc"
+"transforms.customCdc.topic.table.map": "qtmt-tramquantrac:def.abc"
 ```
 
-| Topic | Mapping | Table đích |
-|-------|---------|------------|
-| `qtmt-tramquantrac` | Auto-derive (không có trong map) | `default.qtmt_tramquantrac` |
-| `qtmt-quantrackhithai` | Custom map | `def.abc` |
-
-Chi tiết: xem `TOPIC-TABLE-MAPPING.md`
+| Topic | Table đích |
+|-------|------------|
+| `qtmt-tramquantrac` | `def.abc` (custom map) |
 
 ---
 
@@ -140,7 +126,6 @@ Chi tiết: xem `TOPIC-TABLE-MAPPING.md`
 
 ```powershell
 # Build JAR trong container
-docker exec iceberg-kafka-connect-demo-connect-1 mkdir -p /tmp/custom-smt/src/main/java/com/example/kafka/connect/smt
 docker cp "custom-smt\src\main\java\com\example\kafka\connect\smt\CustomCDCTransform.java" "iceberg-kafka-connect-demo-connect-1:/tmp/custom-smt/src/main/java/com/example/kafka/connect/smt/CustomCDCTransform.java"
 docker cp "build-smt.sh" "iceberg-kafka-connect-demo-connect-1:/tmp/build-smt.sh"
 docker exec iceberg-kafka-connect-demo-connect-1 bash /tmp/build-smt.sh
@@ -183,24 +168,25 @@ docker compose down -v
 
 ```
 ├── configs/
-│   └── sink.tram_quan_trac_cdc_v2.json     # Connector config (topics, mapping, CDC)
+│   └── sink.qtmt_tramquantrac.json          # Connector config (topic → def.abc)
 ├── custom-smt/
-│   └── src/main/.../CustomCDCTransform.java # SMT: version filter, routing, transform
+│   └── src/main/.../CustomCDCTransform.java  # SMT: version filter, routing, transform
 ├── iceberg-kafka-connect-fork/
-│   └── kafka-connect/src/...               # Fork connector source (strip, metadata inject)
+│   └── kafka-connect/src/...                 # Fork connector (strip fields, inject metadata)
 ├── plugins/
-│   ├── custom-smt/custom-cdc-transform.jar # SMT JAR
-│   └── iceberg-kafka-connect/lib/          # Fork connector JARs + dependencies
-├── trino-catalog/iceberg.properties        # Trino config
-├── docker-compose.yml                      # Docker services
-├── Dockerfile.connect                      # Kafka Connect image
-├── test.py                                 # Test script (17 messages, 3 batches, I/U/D/Stale)
-├── sample_message1.json                    # Message format mẫu (tramquantrac)
-├── sample_message2.json                    # Message format mẫu (quantrackhithai)
-├── CONFIG-EXPLAINED.md                     # Giải thích config chi tiết
-├── TOPIC-TABLE-MAPPING.md                  # Cách map topic → table
-├── CUSTOM-SMT-LOGIC.md                     # Logic SMT step-by-step
-└── iceberg_snapshot_metadata_guide.md      # Hướng dẫn fork + metadata injection
+│   ├── custom-smt/custom-cdc-transform.jar   # SMT JAR (pre-built)
+│   └── iceberg-kafka-connect/lib/            # Fork connector JARs + dependencies
+├── docs/                                     # Documentation
+├── trino-catalog/iceberg.properties          # Trino catalog config
+├── docker-compose.yml                        # All services
+├── Dockerfile.connect                        # Kafka Connect image
+├── Dockerfile.hive                           # Hive Metastore image
+├── test.py                                   # Test CDC pipeline (9 messages, I/U/D/Stale)
+├── test_checkpoint.py                        # Test crash recovery
+├── query-snapshots.sql                       # Query snapshot metadata
+├── query-checkpoint.sql                      # Query checkpoint offsets
+├── sample_message1.json                      # Message format mẫu
+└── split_config.json                         # Config structure reference
 ```
 
 ---
@@ -215,3 +201,28 @@ docker compose down -v
 | Hive Metastore | 9083 | Iceberg catalog (metadata) |
 | Trino | 8080 | Query engine |
 | PostgreSQL | 5432 | Hive Metastore backend |
+
+---
+
+## Snapshot Metadata
+
+Mỗi Iceberg commit ghi vào snapshot summary:
+
+```
+connector.name = "sink-qtmt-tramquantrac"   ← connector nào ghi
+typeingest     = "API"                       ← loại ingestion
+```
+
+Truy vết: snapshot → connector.name → GET /connectors/{name}/config → biết topic, table, routing.
+
+---
+
+## Checkpoint
+
+Iceberg connector track offset trong **snapshot summary** (không dùng `kc-offsets`):
+
+```
+kafka.connect.offsets.control-iceberg.cg-control-sink-qtmt-tramquantrac = {"0": N}
+```
+
+Khi restart → đọc latest snapshot → biết tiếp tục từ offset nào → không mất data.

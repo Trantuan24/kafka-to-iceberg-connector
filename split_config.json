@@ -1,0 +1,83 @@
+{
+// --- Config cứng mặc định (tempplace trong code)
+
+    "connector.class": "io.tabular.iceberg.connect.IcebergSinkConnector",
+    "iceberg.tables.dynamic-enabled": "true",
+    "iceberg.tables.route-field": "iceberg_table",
+    "iceberg.tables.auto-create-enabled": "false", // Ko đc tự động tạo table (Mapping)
+    "iceberg.tables.evolve-schema-enabled": "true",
+    "iceberg.tables.schema-force-optional": "true",
+
+    "iceberg.tables.default-id-columns": "dedup_key",
+    "iceberg.tables.cdc-field": "_cdc_op",
+    "iceberg.tables.upsert-mode-enabled": "false",
+    "iceberg.control.commit.timeout-ms": "30000",
+
+    "transforms": "customCdc",
+    "transforms.customCdc.type": "com.example.kafka.connect.smt.CustomCDCTransform",
+
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+
+    "consumer.override.auto.offset.reset": "earliest",
+    "errors.tolerance": "none",
+    "errors.log.enable": "true",
+    "errors.log.include.messages": "true",
+
+
+//---------------------------------------------------------------------
+
+// Config đc param từ UI: 
+    "name": "sink-qtmt-tramquantrac",
+    "topics": "qtmt-tramquantrac",
+    "tasks.max": "1",
+    "iceberg.control.commit.interval-ms": "10000",
+
+  // --- Config chọn table đích: 
+    // Catalog:
+    "iceberg.catalog": "default",
+    "iceberg.catalog.type": "hive",
+    "iceberg.catalog.uri": "thrift://hive-metastore:9083",
+    "iceberg.catalog.warehouse": "s3a://bucket/warehouse/",
+    "iceberg.catalog.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
+    "iceberg.catalog.s3.endpoint": "http://minio:9000",
+    "iceberg.catalog.s3.path-style-access": "true",
+    "iceberg.catalog.s3.access-key-id": "minioadmin",
+    "iceberg.catalog.s3.secret-access-key": "minioadmin",
+    "iceberg.catalog.client.region": "us-east-1",
+    // Namespace: Có thể bỏ qua 
+    "transforms.customCdc.iceberg.namespace": "default",
+    // Table (Đã có Topic + Namespace)
+    "transforms.customCdc.topic.table.map": "qtmt-quantrackhithai:def.abc"
+    // --- Thao tác cụ thể cho cấu hình Table: 
+        1. Chọn catalog: [default ▼]
+       → Backend biết: uri, warehouse, s3 endpoint, credentials...
+       → Gọi API list namespaces từ catalog đó
+
+        2. Chọn namespace: [qtmt ▼]
+        → Gọi API list tables trong namespace đó
+
+        3. Chọn table: [tram_quan_trac ▼]       
+        ==> Mapping: → topic.table.map = "topic:qtmt.tram_quan_trac"
+
+
+    ┌──────────────────────────────────────┐
+    │ TẠO CONNECTOR                        │
+    ├──────────────────────────────────────┤
+    │ Tên*:      [sink-qtmt-tramquantrac ] │
+    ├──────────────────────────────────────┤
+    │ TABLE ĐÍCH                           │
+    │ Catalog*:  [default        ▼]        │
+    │ Namespace*:[qtmt           ▼]        │  ← load từ catalog
+    │ Table*:    [tram_quan_trac ▼]        │  ← load từ namespace
+    ├──────────────────────────────────────┤
+    │ ▸ Cấu hình nâng cao                  │
+    │   Tasks max:        [1         ]     │
+    │   Commit interval:  [10000     ] ms  │
+    └──────────────────────────────────────┘
+
+
+//  --> 1 hàm create_connector merger 2 phần config 
+//  ==> Backend: template + params → JSON → POST /connectors
+}

@@ -65,10 +65,9 @@ public class Coordinator extends Channel implements AutoCloseable {
   private static final String OFFSETS_SNAPSHOT_PROP_FMT = "kafka.connect.offsets.%s.%s";
   private static final String COMMIT_ID_SNAPSHOT_PROP = "kafka.connect.commit-id";
   private static final String VTTS_SNAPSHOT_PROP = "kafka.connect.vtts";
-  // Pipeline lineage metadata (per-table, per-snapshot)
-  private static final String PIPELINE_SNAPSHOT_UUID_PROP = "pipeline.snapshot-uuid";
-  private static final String PIPELINE_TOPIC_PROP = "pipeline.topic";
-  private static final String PIPELINE_SOURCE_TYPE_PROP = "pipeline.source-type";
+  // Lineage metadata (per-table, per-snapshot)
+  private static final String CONNECTOR_NAME_PROP = "connector.name";
+  private static final String TYPEINGEST_PROP = "typeingest";
   private static final Duration POLL_DURATION = Duration.ofMillis(1000);
 
   private final Catalog catalog;
@@ -223,10 +222,6 @@ public class Coordinator extends Channel implements AutoCloseable {
     if (dataFiles.isEmpty() && deleteFiles.isEmpty()) {
       LOG.info("Nothing to commit to table {}, skipping", tableIdentifier);
     } else {
-      // Per-table, per-snapshot lineage metadata
-      String snapshotUuid = UUID.randomUUID().toString();
-      String tableTopic   = tableIdentifier.name(); // 1:1 with Kafka topic in dynamic-routing setup
-      String sourceType   = config.pipelineSourceType();
       if (deleteFiles.isEmpty()) {
         Transaction transaction = table.newTransaction();
 
@@ -242,9 +237,8 @@ public class Coordinator extends Channel implements AutoCloseable {
 
           list.get(i).forEach(appendOp::appendFile);
           appendOp.set(COMMIT_ID_SNAPSHOT_PROP, commitState.currentCommitId().toString());
-          appendOp.set(PIPELINE_SNAPSHOT_UUID_PROP, snapshotUuid);
-          appendOp.set(PIPELINE_TOPIC_PROP, tableTopic);
-          appendOp.set(PIPELINE_SOURCE_TYPE_PROP, sourceType);
+          appendOp.set(CONNECTOR_NAME_PROP, config.connectorName());
+          appendOp.set(TYPEINGEST_PROP, config.getString("typeingest"));
           if (i == lastIdx) {
             appendOp.set(snapshotOffsetsProp, offsetsJson);
             if (vtts != null) {
@@ -261,9 +255,8 @@ public class Coordinator extends Channel implements AutoCloseable {
         branch.ifPresent(deltaOp::toBranch);
         deltaOp.set(snapshotOffsetsProp, offsetsJson);
         deltaOp.set(COMMIT_ID_SNAPSHOT_PROP, commitState.currentCommitId().toString());
-        deltaOp.set(PIPELINE_SNAPSHOT_UUID_PROP, snapshotUuid);
-        deltaOp.set(PIPELINE_TOPIC_PROP, tableTopic);
-        deltaOp.set(PIPELINE_SOURCE_TYPE_PROP, sourceType);
+        deltaOp.set(CONNECTOR_NAME_PROP, config.connectorName());
+        deltaOp.set(TYPEINGEST_PROP, config.getString("typeingest"));
         if (vtts != null) {
           deltaOp.set(VTTS_SNAPSHOT_PROP, Long.toString(vtts.toInstant().toEpochMilli()));
         }
