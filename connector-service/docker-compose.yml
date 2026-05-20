@@ -1,0 +1,42 @@
+services:
+  connect:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    hostname: connect
+    ports:
+      - 8083:8083
+    environment:
+      # --- Kafka Connect framework ---
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: connector-service
+      CONNECT_CONFIG_STORAGE_TOPIC: connector-service-config
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 3
+      CONNECT_OFFSET_STORAGE_TOPIC: connector-service-offsets
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 3
+      CONNECT_STATUS_STORAGE_TOPIC: connector-service-status
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 3
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
+      CONNECT_OFFSET_FLUSH_INTERVAL_MS: 10000
+      KAFKA_HEAP_OPTS: "-Xms512M -Xmx4G"
+
+      # --- External infrastructure (THAY ĐỔI THEO MÔI TRƯỜNG) ---
+      CONNECT_BOOTSTRAP_SERVERS: kafka:9092
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+
+      # --- Logging ---
+      CONNECT_LOG4J_LOGGERS: "org.apache.iceberg.connect=INFO,com.example.kafka.connect.smt=INFO"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
