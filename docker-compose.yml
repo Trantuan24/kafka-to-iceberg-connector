@@ -104,16 +104,12 @@ services:
     healthcheck:
       test: [ "CMD", "nc", "-z", "localhost", "9092" ]
 
-  # Kafka Connect in DISTRIBUTED mode (manage connectors via REST API)
+  # Kafka Connect — dùng image duytuan24/connector-service:1.0
   connect:
-    build:
-      context: .
-      dockerfile: Dockerfile.connect
+    image: duytuan24/connector-service:1.0
     depends_on:
-      - kafka
-      - hive-metastore
-      - minio
-      - create-topics
+      kafka:
+        condition: service_healthy
     hostname: connect
     ports:
       - 8083:8083
@@ -140,7 +136,6 @@ services:
       AWS_REGION: us-east-1
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
-      # Enable DEBUG logging for Iceberg connector
       CONNECT_LOG4J_LOGGERS: "org.apache.iceberg.connect=DEBUG,com.example.kafka.connect.smt=DEBUG"
     entrypoint:
       - bash
@@ -148,10 +143,15 @@ services:
       - |
         echo "Waiting for Hive Metastore to be ready..."
         sleep 30
-        echo "Starting Kafka Connect in DISTRIBUTED mode..."
-        ls -la /usr/share/java/iceberg-kafka-connect/ || echo "WARNING: iceberg-kafka-connect dir not found"
-        ls -la /usr/share/java/custom-smt/ || echo "WARNING: custom-smt dir not found"
+        echo "Starting Kafka Connect..."
         /etc/confluent/docker/run
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   trino:
     image: trinodb/trino:468
