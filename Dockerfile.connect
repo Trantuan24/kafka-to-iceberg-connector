@@ -1,0 +1,9 @@
+# Connector Service: Kafka Connect + Custom SMT + Fork Iceberg Connector
+# Dùng image local đã có sẵn làm base, override plugins bằng JAR mới build
+FROM duytuan24/connector-service:1.0
+
+# Override plugins bằng JAR mới nhất từ root plugins/
+COPY plugins/iceberg-kafka-connect /usr/share/java/iceberg-kafka-connect
+COPY plugins/custom-smt /usr/share/java/custom-smt
+
+EXPOSE 8083

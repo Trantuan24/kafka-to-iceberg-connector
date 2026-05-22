@@ -104,9 +104,11 @@ services:
     healthcheck:
       test: [ "CMD", "nc", "-z", "localhost", "9092" ]
 
-  # Kafka Connect — dùng image duytuan24/connector-service:1.0
+  # Kafka Connect — build local từ Dockerfile.connect (dùng plugins/ ở root)
   connect:
-    image: duytuan24/connector-service:1.0
+    build:
+      context: .
+      dockerfile: Dockerfile.connect
     depends_on:
       kafka:
         condition: service_healthy

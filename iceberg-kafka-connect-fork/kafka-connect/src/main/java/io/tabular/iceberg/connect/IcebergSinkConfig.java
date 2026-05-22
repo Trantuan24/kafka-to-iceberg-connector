@@ -238,11 +238,17 @@ public class IcebergSinkConfig extends AbstractConfig {
         Importance.MEDIUM,
         "Coordinator threads to use for table commits, default is (cores * 2)");
     configDef.define(
-        "typeingest",
+        "task.engine",
         Type.STRING,
-        "",
-        Importance.MEDIUM,
-        "Ingestion type (API, CDC, FILE) to inject into Iceberg snapshot metadata");
+        "consumer",
+        Importance.HIGH,
+        "Task engine type (consumer, nifi, SmartFlow) to identify data pipeline engine");
+    configDef.define(
+        "consumer.typeingest",
+        Type.STRING,
+        "API",
+        Importance.HIGH,
+        "Ingestion type (API, CDC) to classify the data source for lineage tracking");
     return configDef;
   }
 

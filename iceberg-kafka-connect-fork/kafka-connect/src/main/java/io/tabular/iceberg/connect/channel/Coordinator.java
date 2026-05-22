@@ -65,9 +65,12 @@ public class Coordinator extends Channel implements AutoCloseable {
   private static final String OFFSETS_SNAPSHOT_PROP_FMT = "kafka.connect.offsets.%s.%s";
   private static final String COMMIT_ID_SNAPSHOT_PROP = "kafka.connect.commit-id";
   private static final String VTTS_SNAPSHOT_PROP = "kafka.connect.vtts";
-  // Lineage metadata (per-table, per-snapshot)
-  private static final String CONNECTOR_NAME_PROP = "connector.name";
-  private static final String TYPEINGEST_PROP = "typeingest";
+  // Consumer engine standardized lineage metadata
+  private static final String TASK_ENGINE_PROP = "task.engine";
+  private static final String CONSUMER_CONNECTOR_NAME_PROP = "consumer.connectorname";
+  private static final String CONSUMER_TYPEINGEST_PROP = "consumer.typeingest";
+  private static final String CONSUMER_INGEST_TIME_PROP = "consumer.ingest.time";
+  private static final String CONSUMER_VTTS_TIME_PROP = "consumer.vtts.time";
   private static final Duration POLL_DURATION = Duration.ofMillis(1000);
 
   private final Catalog catalog;
@@ -222,6 +225,8 @@ public class Coordinator extends Channel implements AutoCloseable {
     if (dataFiles.isEmpty() && deleteFiles.isEmpty()) {
       LOG.info("Nothing to commit to table {}, skipping", tableIdentifier);
     } else {
+      String currentIngestTimeMs = String.valueOf(System.currentTimeMillis());
+
       if (deleteFiles.isEmpty()) {
         Transaction transaction = table.newTransaction();
 
@@ -237,12 +242,15 @@ public class Coordinator extends Channel implements AutoCloseable {
 
           list.get(i).forEach(appendOp::appendFile);
           appendOp.set(COMMIT_ID_SNAPSHOT_PROP, commitState.currentCommitId().toString());
-          appendOp.set(CONNECTOR_NAME_PROP, config.connectorName());
-          appendOp.set(TYPEINGEST_PROP, config.getString("typeingest"));
+          // Consumer engine standardized metadata
+          appendOp.set(TASK_ENGINE_PROP, config.getString("task.engine"));
+          appendOp.set(CONSUMER_TYPEINGEST_PROP, config.getString("consumer.typeingest"));
+          appendOp.set(CONSUMER_CONNECTOR_NAME_PROP, config.connectorName());
+          appendOp.set(CONSUMER_INGEST_TIME_PROP, currentIngestTimeMs);
           if (i == lastIdx) {
             appendOp.set(snapshotOffsetsProp, offsetsJson);
             if (vtts != null) {
-              appendOp.set(VTTS_SNAPSHOT_PROP, Long.toString(vtts.toInstant().toEpochMilli()));
+              appendOp.set(CONSUMER_VTTS_TIME_PROP, Long.toString(vtts.toInstant().toEpochMilli()));
             }
           }
 
@@ -255,10 +263,13 @@ public class Coordinator extends Channel implements AutoCloseable {
         branch.ifPresent(deltaOp::toBranch);
         deltaOp.set(snapshotOffsetsProp, offsetsJson);
         deltaOp.set(COMMIT_ID_SNAPSHOT_PROP, commitState.currentCommitId().toString());
-        deltaOp.set(CONNECTOR_NAME_PROP, config.connectorName());
-        deltaOp.set(TYPEINGEST_PROP, config.getString("typeingest"));
+        // Consumer engine standardized metadata
+        deltaOp.set(TASK_ENGINE_PROP, config.getString("task.engine"));
+        deltaOp.set(CONSUMER_TYPEINGEST_PROP, config.getString("consumer.typeingest"));
+        deltaOp.set(CONSUMER_CONNECTOR_NAME_PROP, config.connectorName());
+        deltaOp.set(CONSUMER_INGEST_TIME_PROP, currentIngestTimeMs);
         if (vtts != null) {
-          deltaOp.set(VTTS_SNAPSHOT_PROP, Long.toString(vtts.toInstant().toEpochMilli()));
+          deltaOp.set(CONSUMER_VTTS_TIME_PROP, Long.toString(vtts.toInstant().toEpochMilli()));
         }
         dataFiles.forEach(deltaOp::addRows);
         deleteFiles.forEach(deltaOp::addDeletes);
