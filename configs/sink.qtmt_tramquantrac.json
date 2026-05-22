@@ -29,6 +29,7 @@
     "transforms.customCdc.topic.table.map": "qtmt-tramquantrac:def.abc",
     "task.engine": "consumer",
     "consumer.typeingest": "API",
+    "rdbEndpointsId": "b2ff49fb-a463-4c3b-8e6f-a32e9f73ab25",
     "value.converter": "org.apache.kafka.connect.json.JsonConverter",
     "value.converter.schemas.enable": "false",
     "key.converter": "org.apache.kafka.connect.storage.StringConverter",

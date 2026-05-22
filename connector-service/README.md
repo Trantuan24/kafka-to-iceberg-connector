@@ -2,18 +2,26 @@
 
 Kafka Connect với Custom SMT + Fork Iceberg Connector. Đọc data từ Kafka topics, transform, ghi vào Apache Iceberg.
 
+## Phiên bản
+
+| Version | Docker Image | Thay đổi |
+|---------|-------------|---------|
+| `1.1` | `duytuan24/connector-service:1.1` | Chuẩn hóa Snapshot Summary theo Consumer Engine Standard (task.engine, consumer.*) |
+| `1.0` | `duytuan24/connector-service:1.0` | Phiên bản đầu tiên |
+
+---
+
 ## Build Image
 
 ```bash
-docker build -t connector-service:1.0 .
+# Build với version tag
+docker build -t duytuan24/connector-service:1.1 .
+
+# Push lên Docker Hub
+docker push duytuan24/connector-service:1.1
 ```
 
-## Push Registry (thay URL registry)
-
-```bash
-docker tag connector-service:1.0 your-registry.com/connector-service:1.0
-docker push your-registry.com/connector-service:1.0
-```
+---
 
 ## Env vars cần config khi deploy
 
@@ -39,6 +47,8 @@ docker push your-registry.com/connector-service:1.0
 | `CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR` | `3` | Replication factor |
 | `CONNECT_STATUS_STORAGE_REPLICATION_FACTOR` | `3` | Replication factor |
 | `KAFKA_HEAP_OPTS` | `-Xms512M -Xmx4G` | JVM heap |
+
+---
 
 ## REST API (built-in, port 8083)
 
@@ -76,7 +86,9 @@ curl -X POST http://connector-service:8083/connectors \
       "transforms": "customCdc",
       "transforms.customCdc.type": "com.example.kafka.connect.smt.CustomCDCTransform",
       "transforms.customCdc.topic.table.map": "ct_cuahangxangdau:congthuong.cuahangxangdau",
-      "typeingest": "API",
+      "task.engine": "consumer",
+      "consumer.typeingest": "API",
+      "rdbEndpointsId": "<UUID-của-endpoint-nguồn>",
       "value.converter": "org.apache.kafka.connect.json.JsonConverter",
       "value.converter.schemas.enable": "false",
       "key.converter": "org.apache.kafka.connect.storage.StringConverter",
@@ -94,24 +106,49 @@ curl -X POST http://connector-service:8083/connectors \
 |---|---|---|
 | GET | `/connectors` | List tất cả connector |
 | GET | `/connectors/{name}/status` | Status (RUNNING/FAILED) |
+| GET | `/connectors/{name}/config` | Xem toàn bộ config (bao gồm rdbEndpointsId) |
 | PUT | `/connectors/{name}/config` | Update config |
 | DELETE | `/connectors/{name}` | Xóa connector |
 | POST | `/connectors/{name}/restart` | Restart connector |
 | PUT | `/connectors/{name}/pause` | Pause |
 | PUT | `/connectors/{name}/resume` | Resume |
 
-## Snapshot Metadata
+---
 
-Mỗi Iceberg commit tự động ghi vào snapshot summary:
+## Snapshot Metadata (Consumer Engine Standard)
 
+Mỗi Iceberg commit tự động ghi vào snapshot summary các trường chuẩn hóa:
+
+| Key | Ví dụ | Mô tả |
+|-----|-------|-------|
+| `task.engine` | `consumer` | Loại engine xử lý |
+| `consumer.typeingest` | `API` | Phân biệt loại nguồn (API / CDC) |
+| `consumer.connectorname` | `sink-ct-cuahangxangdau` | Tên connector → dùng làm Foreign Key truy vết config qua API |
+| `consumer.ingest.time` | `1779437835253` | Thời gian (Epoch ms) lúc commit vào Iceberg |
+| `consumer.vtts.time` | `1779437830601` | Event time của message trễ nhất (watermark) |
+
+> **Truy vết:** `consumer.connectorname` + `GET /connectors/{name}/config` → lấy ra `rdbEndpointsId` và toàn bộ thông tin nguồn.
+
+### Query snapshot qua Trino:
+
+```sql
+SELECT
+  snapshot_id,
+  committed_at,
+  element_at(summary, 'task.engine')             AS task_engine,
+  element_at(summary, 'consumer.typeingest')      AS consumer_typeingest,
+  element_at(summary, 'consumer.connectorname')   AS consumer_connectorname,
+  element_at(summary, 'consumer.ingest.time')     AS consumer_ingest_time,
+  element_at(summary, 'consumer.vtts.time')       AS consumer_vtts_time
+FROM iceberg.<namespace>."<table>$snapshots"
+ORDER BY committed_at DESC;
 ```
-connector.name = "sink-ct-cuahangxangdau"
-typeingest     = "API"
-```
+
+---
 
 ## Yêu cầu infra bên ngoài
 
 - Kafka cluster (broker accessible từ container)
 - S3/MinIO (storage cho Iceberg data files)
 - Hive Metastore (Iceberg catalog metadata)
-- Iceberg tables phải tạo trước (auto-create = false)
+- Iceberg tables phải tạo trước (`auto-create = false`)
