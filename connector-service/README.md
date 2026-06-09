@@ -6,6 +6,7 @@ Kafka Connect với Custom SMT + Fork Iceberg Connector. Đọc data từ Kafka 
 
 | Version | Docker Image | Thay đổi |
 |---------|-------------|---------|
+| `1.2` | `duytuan24/connector-service:1.2` | Thêm **mode=append** cho SMT: ghi raw message (JSON/XML) vào 1 cột `record`, đích 3 cột |
 | `1.1` | `duytuan24/connector-service:1.1` | Chuẩn hóa Snapshot Summary theo Consumer Engine Standard (task.engine, consumer.*) |
 | `1.0` | `duytuan24/connector-service:1.0` | Phiên bản đầu tiên |
 
@@ -15,10 +16,10 @@ Kafka Connect với Custom SMT + Fork Iceberg Connector. Đọc data từ Kafka 
 
 ```bash
 # Build với version tag
-docker build -t duytuan24/connector-service:1.1 .
+docker build -t duytuan24/connector-service:1.2 .
 
 # Push lên Docker Hub
-docker push duytuan24/connector-service:1.1
+docker push duytuan24/connector-service:1.2
 ```
 
 ---
@@ -112,6 +113,84 @@ curl -X POST http://connector-service:8083/connectors \
 | POST | `/connectors/{name}/restart` | Restart connector |
 | PUT | `/connectors/{name}/pause` | Pause |
 | PUT | `/connectors/{name}/resume` | Resume |
+
+---
+
+## Chế độ xử lý — `mode` (CDC vs Append)
+
+SMT `CustomCDCTransform` có 2 chế độ, chọn bằng `transforms.customCdc.mode`. **Cùng 1 image** phục vụ cả 2 — chỉ khác JSON config khi `POST /connectors`.
+
+| | **CDC** (mặc định) | **Append** |
+|---|---|---|
+| `transforms.customCdc.mode` | `cdc` (hoặc bỏ trống) | `append` |
+| Input | CDC envelope `{data, type, version, key,...}` | Raw message bất kỳ (JSON/XML) |
+| `value.converter` | `JsonConverter` | `StringConverter` |
+| `iceberg.tables.cdc-field` | `_cdc_op` (bắt buộc) | **bỏ** |
+| `iceberg.tables.default-id-columns` | `dedup_key` | **bỏ** |
+| Hành vi | insert/update/delete + dedup + version filter | chỉ append, mỗi message = 1 row |
+| Cột đích Iceberg | 8 cột (id, dedup_key, record, version, type, key, ngay_cap_nhat, length) | **3 cột**: id, record, ngay_cap_nhat |
+
+### Append mode — đích chỉ 3 cột
+
+- `id` = `topic-partition-offset` (tự sinh, unique mỗi message)
+- `record` = toàn bộ message nguyên văn (JSON array hoặc XML) dạng string
+- `ngay_cap_nhat` = thời gian commit (`Instant.now()`)
+
+> **1 topic = 1 định dạng.** Dùng `StringConverter` nên connector không quan tâm nội dung — JSON hay XML đều lưu nguyên văn vào `record`.
+
+DDL table append:
+```sql
+CREATE TABLE iceberg.<ns>.<table> (
+  id VARCHAR, record VARCHAR, ngay_cap_nhat VARCHAR
+) WITH (format = 'PARQUET');
+```
+
+### Tạo connector APPEND:
+
+```bash
+curl -X POST http://connector-service:8083/connectors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "sink-qtmt-append",
+    "config": {
+      "connector.class": "io.tabular.iceberg.connect.IcebergSinkConnector",
+      "tasks.max": "1",
+      "topics": "qtmt-append",
+      "iceberg.tables.dynamic-enabled": "true",
+      "iceberg.tables.route-field": "iceberg_table",
+      "iceberg.tables.auto-create-enabled": "false",
+      "iceberg.tables.evolve-schema-enabled": "true",
+      "iceberg.tables.schema-force-optional": "true",
+      "iceberg.catalog": "production",
+      "iceberg.catalog.type": "hive",
+      "iceberg.catalog.uri": "thrift://hive-metastore:9083",
+      "iceberg.catalog.warehouse": "s3a://lakehouse/warehouse/",
+      "iceberg.catalog.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
+      "iceberg.catalog.s3.endpoint": "http://minio:9000",
+      "iceberg.catalog.s3.path-style-access": "true",
+      "iceberg.catalog.s3.access-key-id": "xxx",
+      "iceberg.catalog.s3.secret-access-key": "xxx",
+      "iceberg.catalog.client.region": "us-east-1",
+      "iceberg.control.commit.interval-ms": "10000",
+      "iceberg.control.commit.timeout-ms": "30000",
+      "transforms": "customCdc",
+      "transforms.customCdc.type": "com.example.kafka.connect.smt.CustomCDCTransform",
+      "transforms.customCdc.mode": "append",
+      "transforms.customCdc.topic.table.map": "qtmt-append:congthuong.tramquantrac_raw",
+      "task.engine": "consumer",
+      "consumer.typeingest": "API",
+      "rdbEndpointsId": "<UUID-của-endpoint-nguồn>",
+      "value.converter": "org.apache.kafka.connect.storage.StringConverter",
+      "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+      "consumer.override.auto.offset.reset": "earliest",
+      "errors.tolerance": "none",
+      "errors.log.enable": "true",
+      "errors.log.include.messages": "true"
+    }
+  }'
+```
+
+> Lưu ý: append mode là **at-least-once** — redeliver trước khi commit có thể append trùng row (không có dedup theo thiết kế).
 
 ---
 
