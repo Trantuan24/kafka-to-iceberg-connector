@@ -22,36 +22,39 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Custom SMT to transform CDC messages to Iceberg-compatible format.
- * Phase 1: Append-only mode with 7 fields.
+ * Custom SMT transforming Kafka messages into Iceberg-compatible records.
+ * Behaviour is selected by the "mode" config (transforms.&lt;name&gt;.mode):
  *
- * Input (custom CDC envelope from Kafka):
- * {
- *   "data": [...],
- *   "key": "MaTram",
- *   "type": "INSERT",
- *   "version": 1,
- *   "ngay_cap_nhat": "2026-04-19T15:00:00Z",
- *   "length": 2
- * }
+ * ====================================================================
+ * MODE = "cdc" (default)
+ * ====================================================================
+ * Input (CDC envelope):
+ * { "data": [...], "key": "MaTram", "type": "INSERT", "version": 1,
+ *   "ngay_cap_nhat": "...", "length": 2 }
  *
- * Output (Iceberg-compatible record with 7 fields):
- * {
- *   "id": "tram_quan_trac-0-12",
- *   "record": "[{...}, {...}]",
- *   "version": 1,
- *   "type": "INSERT",
- *   "key": "MaTram",
- *   "ngay_cap_nhat": "2026-04-19T15:00:00Z",
- *   "length": "2"
- * }
+ * Output struct (10 fields). After the fork connector strips the
+ * route-field (iceberg_table) and cdc-field (_cdc_op), 8 columns land
+ * in Iceberg: id, dedup_key, record, version, type, key, ngay_cap_nhat, length.
+ * Includes an in-memory version filter to drop stale/out-of-order records.
+ * Requires value.converter = JsonConverter (schemas.enable=false).
  *
- * Notes:
- * - id: topic-partition-offset (deterministic), falls back to UUID if offset unavailable
- * - record: entire data[] serialized as JSON string
- * - version: BIGINT (INT64)
- * - length: STRING (to match table schema VARCHAR)
- * - No dedup_key, ingest_time, _cdc in Phase 1
+ * ====================================================================
+ * MODE = "append"
+ * ====================================================================
+ * Raw passthrough: the ENTIRE message body (JSON or XML) is stored as a
+ * string in `record`. No CDC, no dedup, no version filter — every message
+ * becomes one appended row.
+ *
+ * Output struct: id, record, ngay_cap_nhat (+ iceberg_table routing field,
+ * stripped before write) => Iceberg table has exactly 3 columns.
+ *   - id            : topic-partition-offset (deterministic, unique per message)
+ *   - record        : raw message body, verbatim
+ *   - ngay_cap_nhat : Instant.now() generated at transform time
+ * Use value.converter = StringConverter so any format (JSON/XML) passes
+ * through untouched. One topic carries one format.
+ *
+ * Note: append is at-least-once; a redelivery before commit may re-append
+ * a row (no dedup by design).
  */
 public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transformation<R> {
 
@@ -62,9 +65,18 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
     private static final String ICEBERG_NAMESPACE_CONFIG = "iceberg.namespace";
     private static final String ICEBERG_NAMESPACE_DEFAULT = "default";
     private static final String TOPIC_TABLE_MAP_CONFIG = "topic.table.map";
+    private static final String MODE_CONFIG = "mode";
+    private static final String MODE_CDC = "cdc";
+    private static final String MODE_APPEND = "append";
 
-    // Schema for transformed record
+    // Schema for transformed record (CDC mode, 10 fields)
     private Schema transformedSchema;
+
+    // Schema for append mode (3 data fields + routing field)
+    private Schema appendSchema;
+
+    // Processing mode: "cdc" (default) or "append"
+    private String mode = MODE_CDC;
 
     // Configurable namespace for table routing (fallback)
     private String icebergNamespace = ICEBERG_NAMESPACE_DEFAULT;
@@ -80,6 +92,14 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
 
     @Override
     public void configure(Map<String, ?> configs) {
+        // Read processing mode (default "cdc"). "append" = raw passthrough, 3 columns.
+        Object modeObj = configs.get(MODE_CONFIG);
+        if (modeObj != null && MODE_APPEND.equalsIgnoreCase(modeObj.toString().trim())) {
+            mode = MODE_APPEND;
+        } else {
+            mode = MODE_CDC;
+        }
+
         // Read configurable namespace (default "default")
         Object nsObj = configs.get(ICEBERG_NAMESPACE_CONFIG);
         if (nsObj != null && !nsObj.toString().isEmpty()) {
@@ -112,7 +132,17 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
             .field("_cdc_op", Schema.OPTIONAL_STRING_SCHEMA)
             .build();
 
-        log.info("CustomCDCTransform configured. 10 fields output. namespace={}", icebergNamespace);
+        // Append-mode schema: only 3 data columns end up in Iceberg
+        // (iceberg_table is the route-field and is stripped by the connector before write).
+        appendSchema = SchemaBuilder.struct()
+            .name("com.example.cdc.AppendRecord")
+            .field("id", Schema.OPTIONAL_STRING_SCHEMA)
+            .field("record", Schema.OPTIONAL_STRING_SCHEMA)
+            .field("ngay_cap_nhat", Schema.OPTIONAL_STRING_SCHEMA)
+            .field("iceberg_table", Schema.OPTIONAL_STRING_SCHEMA)
+            .build();
+
+        log.info("CustomCDCTransform configured. mode={}, namespace={}", mode, icebergNamespace);
     }
 
     @Override
@@ -129,6 +159,12 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
             log.info("Skipping tombstone record (topic={}, partition={}, offset={})",
                 record.topic(), record.kafkaPartition(), getOffset(record));
             return record;
+        }
+
+        // APPEND MODE: raw passthrough. The whole message body (JSON or XML) is stored
+        // as a string in `record`. Output only id, record, ngay_cap_nhat (+ routing field).
+        if (MODE_APPEND.equals(mode)) {
+            return applyAppend(record);
         }
 
         try {
@@ -216,8 +252,68 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
         }
     }
 
-    private Struct transformValue(String id, Map<String, Object> value, String topic) throws Exception {
-        // Extract fields from CDC message
+    /**
+     * APPEND MODE handler.
+     * Stores the entire raw message body into `record` as a string (works for both
+     * JSON and XML when value.converter=StringConverter). Generates id and ngay_cap_nhat.
+     * Output: id, record, ngay_cap_nhat (+ iceberg_table routing field, stripped on write).
+     */
+    private R applyAppend(R record) {
+        try {
+            Object val = record.value();
+            String recordStr;
+            if (val instanceof String) {
+                // StringConverter: raw JSON or XML text, store as-is
+                recordStr = (String) val;
+            } else if (val instanceof Struct) {
+                recordStr = objectMapper.writeValueAsString(structToMap((Struct) val));
+            } else {
+                // Map / List (JsonConverter) or any other type -> serialize to JSON string
+                recordStr = objectMapper.writeValueAsString(val);
+            }
+
+            String id = generateId(record);
+            String ngayCapNhat = java.time.Instant.now().toString();
+            String icebergTable = resolveTable(record.topic());
+
+            Struct out = new Struct(appendSchema);
+            out.put("id", id);
+            out.put("record", recordStr);
+            out.put("ngay_cap_nhat", ngayCapNhat);
+            out.put("iceberg_table", icebergTable);
+
+            log.info("[APPEND] id={}, table={}, record_len={}", id, icebergTable, recordStr.length());
+
+            return record.newRecord(
+                record.topic(),
+                record.kafkaPartition(),
+                record.keySchema(),
+                record.key(),
+                appendSchema,
+                out,
+                record.timestamp()
+            );
+        } catch (Exception e) {
+            String errorMsg = String.format(
+                "CustomCDCTransform[append] FAILED. topic=%s, partition=%s, offset=%s",
+                record.topic(), record.kafkaPartition(), getOffset(record));
+            log.error(errorMsg, e);
+            throw new DataException(errorMsg, e);
+        }
+    }
+
+    /**
+     * Resolve target Iceberg table for a topic.
+     * Uses topic.table.map first, falls back to namespace + "." + topic (dashes -> underscores).
+     */
+    private String resolveTable(String topic) {
+        if (topic != null && topicTableMap.containsKey(topic)) {
+            return topicTableMap.get(topic);
+        }
+        return icebergNamespace + "." + (topic != null ? topic.replace("-", "_") : "unknown");
+    }
+
+    private Struct transformValue(String id, Map<String, Object> value, String topic) throws Exception {        // Extract fields from CDC message
         String businessKey = getStringField(value, "key");
         Object dataObj = value.get("data");
         String type = getStringField(value, "type");
