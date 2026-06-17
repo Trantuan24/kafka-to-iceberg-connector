@@ -74,6 +74,7 @@ services:
         kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic tram_quan_trac --partitions 1 --replication-factor 1
         kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic qtmt-tramquantrac --partitions 1 --replication-factor 1
         kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic qtmt-quantrackhithai --partitions 1 --replication-factor 1
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic qtmt-append --partitions 1 --replication-factor 1
         echo "Topics created successfully"
         kafka-topics --bootstrap-server kafka:9092 --list
         
