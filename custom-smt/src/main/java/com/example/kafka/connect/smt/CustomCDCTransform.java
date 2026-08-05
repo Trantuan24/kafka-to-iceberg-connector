@@ -2,6 +2,7 @@ package com.example.kafka.connect.smt;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.kafka.common.config.ConfigDef;
+import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.connect.connector.ConnectRecord;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
@@ -53,8 +54,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * Use value.converter = StringConverter so any format (JSON/XML) passes
  * through untouched. One topic carries one format.
  *
- * Note: append is at-least-once; a redelivery before commit may re-append
- * a row (no dedup by design).
+ * Append mode does not perform business-key deduplication. Distinct Kafka
+ * records, including records with identical payloads, become distinct rows.
  */
 public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transformation<R> {
 
@@ -69,6 +70,27 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
     private static final String MODE_CDC = "cdc";
     private static final String MODE_APPEND = "append";
 
+    private static final ConfigDef CONFIG_DEF = new ConfigDef()
+        .define(
+            MODE_CONFIG,
+            ConfigDef.Type.STRING,
+            MODE_CDC,
+            ConfigDef.ValidString.in(MODE_CDC, MODE_APPEND),
+            ConfigDef.Importance.HIGH,
+            "Processing mode: cdc or append")
+        .define(
+            ICEBERG_NAMESPACE_CONFIG,
+            ConfigDef.Type.STRING,
+            ICEBERG_NAMESPACE_DEFAULT,
+            ConfigDef.Importance.MEDIUM,
+            "Fallback Iceberg namespace used by CDC routing")
+        .define(
+            TOPIC_TABLE_MAP_CONFIG,
+            ConfigDef.Type.STRING,
+            "",
+            ConfigDef.Importance.HIGH,
+            "Comma-separated topic:namespace.table mappings; required in append mode");
+
     // Schema for transformed record (CDC mode, 10 fields)
     private Schema transformedSchema;
 
@@ -82,7 +104,7 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
     private String icebergNamespace = ICEBERG_NAMESPACE_DEFAULT;
 
     // Custom topic → table mapping (topic → "namespace.table")
-    private final java.util.Map<String, String> topicTableMap = new HashMap<>();
+    private final Map<String, String> topicTableMap = new HashMap<>();
 
     /**
      * In-memory version cache: dedup_key -> max version seen.
@@ -92,29 +114,39 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
 
     @Override
     public void configure(Map<String, ?> configs) {
-        // Read processing mode (default "cdc"). "append" = raw passthrough, 3 columns.
+        topicTableMap.clear();
+        versionCache.clear();
+        icebergNamespace = ICEBERG_NAMESPACE_DEFAULT;
+
+        // Read processing mode (default "cdc"). Reject typos instead of silently using CDC.
         Object modeObj = configs.get(MODE_CONFIG);
-        if (modeObj != null && MODE_APPEND.equalsIgnoreCase(modeObj.toString().trim())) {
-            mode = MODE_APPEND;
-        } else {
-            mode = MODE_CDC;
+        String configuredMode = modeObj == null ? MODE_CDC : modeObj.toString().trim();
+        if (!MODE_CDC.equals(configuredMode) && !MODE_APPEND.equals(configuredMode)) {
+            throw new ConfigException(
+                MODE_CONFIG, configuredMode, "Expected one of: " + MODE_CDC + ", " + MODE_APPEND);
         }
+        mode = configuredMode;
 
         // Read configurable namespace (default "default")
         Object nsObj = configs.get(ICEBERG_NAMESPACE_CONFIG);
-        if (nsObj != null && !nsObj.toString().isEmpty()) {
-            icebergNamespace = nsObj.toString();
+        if (nsObj != null) {
+            String configuredNamespace = nsObj.toString().trim();
+            if (configuredNamespace.isEmpty()) {
+                throw new ConfigException(
+                    ICEBERG_NAMESPACE_CONFIG, nsObj, "Namespace must not be blank");
+            }
+            icebergNamespace = configuredNamespace;
         }
 
         // Read topic→table mapping: "topic1:ns.table1,topic2:ns.table2"
         Object mapObj = configs.get(TOPIC_TABLE_MAP_CONFIG);
-        if (mapObj != null && !mapObj.toString().isEmpty()) {
-            for (String entry : mapObj.toString().split(",")) {
-                String[] parts = entry.trim().split(":");
-                if (parts.length == 2) {
-                    topicTableMap.put(parts[0].trim(), parts[1].trim());
-                }
-            }
+        parseTopicTableMap(mapObj);
+        if (MODE_APPEND.equals(mode) && topicTableMap.isEmpty()) {
+            throw new ConfigException(
+                TOPIC_TABLE_MAP_CONFIG, mapObj,
+                "At least one topic-to-table mapping is required in append mode");
+        }
+        if (!topicTableMap.isEmpty()) {
             log.info("Topic-table mapping loaded: {}", topicTableMap);
         }
 
@@ -148,7 +180,7 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
     @Override
     public R apply(R record) {
         // Log input for debugging
-        log.info("CustomCDCTransform input: topic={}, partition={}, offset={}, valueClass={}",
+        log.debug("CustomCDCTransform input: topic={}, partition={}, offset={}, valueClass={}",
             record.topic(),
             record.kafkaPartition(),
             getOffset(record),
@@ -156,7 +188,7 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
 
         // Tombstone records: pass through as-is (do NOT return null)
         if (record.value() == null) {
-            log.info("Skipping tombstone record (topic={}, partition={}, offset={})",
+            log.debug("Skipping tombstone record (topic={}, partition={}, offset={})",
                 record.topic(), record.kafkaPartition(), getOffset(record));
             return record;
         }
@@ -261,16 +293,14 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
     private R applyAppend(R record) {
         try {
             Object val = record.value();
-            String recordStr;
-            if (val instanceof String) {
-                // StringConverter: raw JSON or XML text, store as-is
-                recordStr = (String) val;
-            } else if (val instanceof Struct) {
-                recordStr = objectMapper.writeValueAsString(structToMap((Struct) val));
-            } else {
-                // Map / List (JsonConverter) or any other type -> serialize to JSON string
-                recordStr = objectMapper.writeValueAsString(val);
+            if (!(val instanceof String)) {
+                throw new DataException(String.format(
+                    "Append mode requires a String value from StringConverter, but received %s " +
+                        "(topic=%s, partition=%s, offset=%s)",
+                    val.getClass().getName(), record.topic(), record.kafkaPartition(), getOffset(record)));
             }
+            // StringConverter: raw JSON or XML text, store verbatim.
+            String recordStr = (String) val;
 
             String id = generateId(record);
             String ngayCapNhat = java.time.Instant.now().toString();
@@ -282,7 +312,7 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
             out.put("ngay_cap_nhat", ngayCapNhat);
             out.put("iceberg_table", icebergTable);
 
-            log.info("[APPEND] id={}, table={}, record_len={}", id, icebergTable, recordStr.length());
+            log.debug("[APPEND] id={}, table={}, record_len={}", id, icebergTable, recordStr.length());
 
             return record.newRecord(
                 record.topic(),
@@ -293,6 +323,8 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
                 out,
                 record.timestamp()
             );
+        } catch (DataException e) {
+            throw e;
         } catch (Exception e) {
             String errorMsg = String.format(
                 "CustomCDCTransform[append] FAILED. topic=%s, partition=%s, offset=%s",
@@ -303,14 +335,64 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
     }
 
     /**
-     * Resolve target Iceberg table for a topic.
-     * Uses topic.table.map first, falls back to namespace + "." + topic (dashes -> underscores).
+     * Resolve target Iceberg table for a topic. Append mode requires an explicit
+     * mapping; CDC mode retains the namespace/topic fallback for compatibility.
      */
     private String resolveTable(String topic) {
         if (topic != null && topicTableMap.containsKey(topic)) {
             return topicTableMap.get(topic);
         }
+        if (MODE_APPEND.equals(mode)) {
+            throw new DataException(
+                "No topic.table.map entry configured for append topic: " + topic);
+        }
         return icebergNamespace + "." + (topic != null ? topic.replace("-", "_") : "unknown");
+    }
+
+    private void parseTopicTableMap(Object mapObj) {
+        if (mapObj == null || mapObj.toString().trim().isEmpty()) {
+            return;
+        }
+
+        String rawMap = mapObj.toString();
+        for (String rawEntry : rawMap.split(",", -1)) {
+            String entry = rawEntry.trim();
+            int separator = entry.indexOf(':');
+            if (entry.isEmpty() || separator <= 0 || separator != entry.lastIndexOf(':')
+                    || separator == entry.length() - 1) {
+                throw new ConfigException(
+                    TOPIC_TABLE_MAP_CONFIG,
+                    rawMap,
+                    "Each entry must use topic:namespace.table syntax; invalid entry: '" + entry + "'");
+            }
+
+            String topic = entry.substring(0, separator).trim();
+            String table = entry.substring(separator + 1).trim();
+            if (topic.isEmpty() || !isQualifiedTableName(table)) {
+                throw new ConfigException(
+                    TOPIC_TABLE_MAP_CONFIG,
+                    rawMap,
+                    "Each entry must contain a non-blank topic and qualified table; invalid entry: '"
+                        + entry + "'");
+            }
+            if (topicTableMap.putIfAbsent(topic, table) != null) {
+                throw new ConfigException(
+                    TOPIC_TABLE_MAP_CONFIG, rawMap, "Duplicate mapping for topic: " + topic);
+            }
+        }
+    }
+
+    private boolean isQualifiedTableName(String table) {
+        String[] parts = table.split("\\.", -1);
+        if (parts.length < 2) {
+            return false;
+        }
+        for (String part : parts) {
+            if (part.trim().isEmpty()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private Struct transformValue(String id, Map<String, Object> value, String topic) throws Exception {        // Extract fields from CDC message
@@ -513,7 +595,7 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
 
     @Override
     public ConfigDef config() {
-        return new ConfigDef();
+        return CONFIG_DEF;
     }
 
     @Override
