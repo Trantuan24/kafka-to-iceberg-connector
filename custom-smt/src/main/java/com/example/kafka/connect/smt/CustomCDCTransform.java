@@ -1,6 +1,8 @@
 package com.example.kafka.connect.smt;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.connect.connector.ConnectRecord;
@@ -9,16 +11,26 @@ import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.DataException;
+import org.apache.kafka.connect.header.Header;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.transforms.Transformation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.DateTimeException;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -42,19 +54,15 @@ import java.util.concurrent.ConcurrentHashMap;
  * ====================================================================
  * MODE = "append"
  * ====================================================================
- * Raw passthrough: the ENTIRE message body (JSON or XML) is stored as a
- * string in `record`. No CDC, no dedup, no version filter — every message
- * becomes one appended row.
+ * Raw passthrough: the ENTIRE Kafka value (JSON, XML or an empty string)
+ * is stored verbatim in `data`. Optional API metadata is read from Kafka
+ * headers `api.body` and `api.headers`.
  *
- * Output struct: id, record, ngay_cap_nhat (+ iceberg_table routing field,
- * stripped before write) => Iceberg table has exactly 3 columns.
- *   - id            : topic-partition-offset (deterministic, unique per message)
- *   - record        : raw message body, verbatim
- *   - ngay_cap_nhat : Instant.now() generated at transform time
- * Use value.converter = StringConverter so any format (JSON/XML) passes
- * through untouched. One topic carries one format.
- *
- * Append mode does not perform business-key deduplication. Distinct Kafka
+ * Output data columns: loainguon, manguondulieu, sukien, phienban, body,
+ * header, data, ingest_date, ingest_time. The additional iceberg_table field
+ * is stripped by the sink connector before writing.
+ * Use value.converter = StringConverter so any text format passes through.
+ * * Append mode does not perform business-key deduplication. Distinct Kafka
  * records, including records with identical payloads, become distinct rows.
  */
 public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transformation<R> {
@@ -69,6 +77,25 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
     private static final String MODE_CONFIG = "mode";
     private static final String MODE_CDC = "cdc";
     private static final String MODE_APPEND = "append";
+    private static final String APPEND_SOURCE_TYPE_CONFIG = "append.source.type";
+    private static final String APPEND_SOURCE_TYPE_DEFAULT = "api_push";
+    private static final String APPEND_SCHEMA_VERSION_CONFIG = "append.schema.version";
+    private static final int APPEND_SCHEMA_VERSION_DEFAULT = 1;
+    private static final String APPEND_TIMEZONE_CONFIG = "append.timezone";
+    private static final String APPEND_TIMEZONE_DEFAULT = "Asia/Ho_Chi_Minh";
+    private static final String APPEND_BODY_HEADER_CONFIG = "append.body.header";
+    private static final String APPEND_BODY_HEADER_DEFAULT = "api.body";
+    private static final String APPEND_HEADERS_HEADER_CONFIG = "append.headers.header";
+    private static final String APPEND_HEADERS_HEADER_DEFAULT = "api.headers";
+    private static final Set<String> SAFE_HTTP_HEADERS = Set.of(
+        "content-type",
+        "accept",
+        "user-agent",
+        "x-request-id",
+        "x-correlation-id",
+        "traceparent");
+    private static final DateTimeFormatter INGEST_TIME_FORMATTER =
+        DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS");
 
     private static final ConfigDef CONFIG_DEF = new ConfigDef()
         .define(
@@ -89,16 +116,54 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
             ConfigDef.Type.STRING,
             "",
             ConfigDef.Importance.HIGH,
-            "Comma-separated topic:namespace.table mappings; required in append mode");
+            "Comma-separated topic:namespace.table mappings; required in append mode")
+        .define(
+            APPEND_SOURCE_TYPE_CONFIG,
+            ConfigDef.Type.STRING,
+            APPEND_SOURCE_TYPE_DEFAULT,
+            ConfigDef.Importance.MEDIUM,
+            "Value written to loainguon in append mode")
+        .define(
+            APPEND_SCHEMA_VERSION_CONFIG,
+            ConfigDef.Type.INT,
+            APPEND_SCHEMA_VERSION_DEFAULT,
+            ConfigDef.Range.atLeast(1),
+            ConfigDef.Importance.MEDIUM,
+            "Landing contract version written to phienban in append mode")
+        .define(
+            APPEND_TIMEZONE_CONFIG,
+            ConfigDef.Type.STRING,
+            APPEND_TIMEZONE_DEFAULT,
+            ConfigDef.Importance.MEDIUM,
+            "Time zone used to generate append ingest_date and ingest_time")
+        .define(
+            APPEND_BODY_HEADER_CONFIG,
+            ConfigDef.Type.STRING,
+            APPEND_BODY_HEADER_DEFAULT,
+            ConfigDef.Importance.LOW,
+            "Kafka header containing API parameters/body metadata")
+        .define(
+            APPEND_HEADERS_HEADER_CONFIG,
+            ConfigDef.Type.STRING,
+            APPEND_HEADERS_HEADER_DEFAULT,
+            ConfigDef.Importance.LOW,
+            "Kafka header containing an HTTP headers JSON object");
 
     // Schema for transformed record (CDC mode, 10 fields)
     private Schema transformedSchema;
 
-    // Schema for append mode (3 data fields + routing field)
+    // Schema for append mode (9 data fields + routing field)
     private Schema appendSchema;
 
     // Processing mode: "cdc" (default) or "append"
     private String mode = MODE_CDC;
+
+    private String appendSourceType = APPEND_SOURCE_TYPE_DEFAULT;
+    private int appendSchemaVersion = APPEND_SCHEMA_VERSION_DEFAULT;
+    private ZoneId appendZone = ZoneId.of(APPEND_TIMEZONE_DEFAULT);
+    private String appendBodyHeader = APPEND_BODY_HEADER_DEFAULT;
+    private String appendHeadersHeader = APPEND_HEADERS_HEADER_DEFAULT;
+    private final Clock clockOverride;
 
     // Configurable namespace for table routing (fallback)
     private String icebergNamespace = ICEBERG_NAMESPACE_DEFAULT;
@@ -112,11 +177,35 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
      */
     private final ConcurrentHashMap<String, Long> versionCache = new ConcurrentHashMap<>();
 
+    public CustomCDCTransform() {
+        this(null);
+    }
+
+    CustomCDCTransform(Clock clockOverride) {
+        this.clockOverride = clockOverride;
+    }
+
     @Override
     public void configure(Map<String, ?> configs) {
         topicTableMap.clear();
         versionCache.clear();
         icebergNamespace = ICEBERG_NAMESPACE_DEFAULT;
+        appendSourceType = readNonBlankConfig(
+            configs, APPEND_SOURCE_TYPE_CONFIG, APPEND_SOURCE_TYPE_DEFAULT);
+        appendSchemaVersion = readPositiveIntConfig(
+            configs, APPEND_SCHEMA_VERSION_CONFIG, APPEND_SCHEMA_VERSION_DEFAULT);
+        appendBodyHeader = readNonBlankConfig(
+            configs, APPEND_BODY_HEADER_CONFIG, APPEND_BODY_HEADER_DEFAULT);
+        appendHeadersHeader = readNonBlankConfig(
+            configs, APPEND_HEADERS_HEADER_CONFIG, APPEND_HEADERS_HEADER_DEFAULT);
+        String timezone = readNonBlankConfig(
+            configs, APPEND_TIMEZONE_CONFIG, APPEND_TIMEZONE_DEFAULT);
+        try {
+            appendZone = ZoneId.of(timezone);
+        } catch (DateTimeException e) {
+            throw new ConfigException(
+                APPEND_TIMEZONE_CONFIG, timezone, "Invalid time zone: " + e.getMessage());
+        }
 
         // Read processing mode (default "cdc"). Reject typos instead of silently using CDC.
         Object modeObj = configs.get(MODE_CONFIG);
@@ -164,13 +253,19 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
             .field("_cdc_op", Schema.OPTIONAL_STRING_SCHEMA)
             .build();
 
-        // Append-mode schema: only 3 data columns end up in Iceberg
+        // Append-mode schema: 9 data columns end up in Iceberg
         // (iceberg_table is the route-field and is stripped by the connector before write).
         appendSchema = SchemaBuilder.struct()
             .name("com.example.cdc.AppendRecord")
-            .field("id", Schema.OPTIONAL_STRING_SCHEMA)
-            .field("record", Schema.OPTIONAL_STRING_SCHEMA)
-            .field("ngay_cap_nhat", Schema.OPTIONAL_STRING_SCHEMA)
+            .field("loainguon", Schema.OPTIONAL_STRING_SCHEMA)
+            .field("manguondulieu", Schema.OPTIONAL_STRING_SCHEMA)
+            .field("sukien", Schema.OPTIONAL_STRING_SCHEMA)
+            .field("phienban", Schema.OPTIONAL_INT32_SCHEMA)
+            .field("body", Schema.OPTIONAL_STRING_SCHEMA)
+            .field("header", Schema.OPTIONAL_STRING_SCHEMA)
+            .field("data", Schema.OPTIONAL_STRING_SCHEMA)
+            .field("ingest_date", Schema.OPTIONAL_STRING_SCHEMA)
+            .field("ingest_time", Schema.OPTIONAL_STRING_SCHEMA)
             .field("iceberg_table", Schema.OPTIONAL_STRING_SCHEMA)
             .build();
 
@@ -193,8 +288,7 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
             return record;
         }
 
-        // APPEND MODE: raw passthrough. The whole message body (JSON or XML) is stored
-        // as a string in `record`. Output only id, record, ngay_cap_nhat (+ routing field).
+        // APPEND MODE: preserve the raw value and enrich it with safe API metadata.
         if (MODE_APPEND.equals(mode)) {
             return applyAppend(record);
         }
@@ -285,10 +379,8 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
     }
 
     /**
-     * APPEND MODE handler.
-     * Stores the entire raw message body into `record` as a string (works for both
-     * JSON and XML when value.converter=StringConverter). Generates id and ngay_cap_nhat.
-     * Output: id, record, ngay_cap_nhat (+ iceberg_table routing field, stripped on write).
+     * APPEND MODE handler. Preserves the raw String value in `data`, enriches it
+     * with safe API metadata and routes the resulting nine-column record.
      */
     private R applyAppend(R record) {
         try {
@@ -299,20 +391,40 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
                         "(topic=%s, partition=%s, offset=%s)",
                     val.getClass().getName(), record.topic(), record.kafkaPartition(), getOffset(record)));
             }
-            // StringConverter: raw JSON or XML text, store verbatim.
-            String recordStr = (String) val;
 
-            String id = generateId(record);
-            String ngayCapNhat = java.time.Instant.now().toString();
+            String data = (String) val;
+            String maNguonDuLieu = generateId(record);
+            String body = readKafkaHeader(record, appendBodyHeader);
+            String httpHeaders = sanitizeHttpHeaders(
+                readKafkaHeader(record, appendHeadersHeader), record);
+            Clock effectiveClock = clockOverride == null
+                ? Clock.system(appendZone)
+                : clockOverride.withZone(appendZone);
+            ZonedDateTime now = ZonedDateTime.now(effectiveClock);
+            String ingestDate = now.toLocalDate().toString();
+            String ingestTime = INGEST_TIME_FORMATTER.format(now);
             String icebergTable = resolveTable(record.topic());
 
             Struct out = new Struct(appendSchema);
-            out.put("id", id);
-            out.put("record", recordStr);
-            out.put("ngay_cap_nhat", ngayCapNhat);
+            out.put("loainguon", appendSourceType);
+            out.put("manguondulieu", maNguonDuLieu);
+            out.put("sukien", null);
+            out.put("phienban", appendSchemaVersion);
+            out.put("body", body);
+            out.put("header", httpHeaders);
+            out.put("data", data);
+            out.put("ingest_date", ingestDate);
+            out.put("ingest_time", ingestTime);
             out.put("iceberg_table", icebergTable);
 
-            log.debug("[APPEND] id={}, table={}, record_len={}", id, icebergTable, recordStr.length());
+            log.debug(
+                "[APPEND] source={}, id={}, table={}, data_len={}, has_body={}, has_headers={}",
+                appendSourceType,
+                maNguonDuLieu,
+                icebergTable,
+                data.length(),
+                body != null,
+                httpHeaders != null);
 
             return record.newRecord(
                 record.topic(),
@@ -334,6 +446,119 @@ public class CustomCDCTransform<R extends ConnectRecord<R>> implements Transform
         }
     }
 
+    private String readKafkaHeader(R record, String headerName) {
+        Header kafkaHeader = record.headers().lastWithName(headerName);
+        if (kafkaHeader == null || kafkaHeader.value() == null) {
+            return null;
+        }
+
+        Object value = kafkaHeader.value();
+        String text;
+        if (value instanceof String) {
+            text = (String) value;
+        } else if (value instanceof byte[]) {
+            text = new String((byte[]) value, StandardCharsets.UTF_8);
+        } else if (value instanceof Map || value instanceof List) {
+            try {
+                text = objectMapper.writeValueAsString(value);
+            } catch (Exception e) {
+                log.warn(
+                    "Ignoring Kafka header {} because its structured value cannot be serialized " +
+                        "(topic={}, partition={}, offset={}): {}",
+                    headerName,
+                    record.topic(),
+                    record.kafkaPartition(),
+                    getOffset(record),
+                    e.getMessage());
+                return null;
+            }
+        } else {
+            log.warn(
+                "Ignoring Kafka header {} with unsupported value type {} " +
+                    "(topic={}, partition={}, offset={})",
+                headerName,
+                value.getClass().getName(),
+                record.topic(),
+                record.kafkaPartition(),
+                getOffset(record));
+            return null;
+        }
+
+        return text.trim().isEmpty() ? null : text;
+    }
+
+    private String sanitizeHttpHeaders(String rawHeaders, R record) {
+        if (rawHeaders == null) {
+            return null;
+        }
+
+        try {
+            JsonNode root = objectMapper.readTree(rawHeaders);
+            if (root == null || !root.isObject()) {
+                log.warn(
+                    "Ignoring {} because it is not a JSON object " +
+                        "(topic={}, partition={}, offset={})",
+                    appendHeadersHeader,
+                    record.topic(),
+                    record.kafkaPartition(),
+                    getOffset(record));
+                return null;
+            }
+
+            ObjectNode sanitized = objectMapper.createObjectNode();
+            Iterator<Map.Entry<String, JsonNode>> fields = root.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> field = fields.next();
+                String normalizedName = field.getKey().trim().toLowerCase(Locale.ROOT);
+                if (SAFE_HTTP_HEADERS.contains(normalizedName)) {
+                    sanitized.set(normalizedName, field.getValue());
+                }
+            }
+
+            return sanitized.size() == 0 ? null : objectMapper.writeValueAsString(sanitized);
+        } catch (Exception e) {
+            log.warn(
+                "Ignoring invalid JSON in Kafka header {} " +
+                    "(topic={}, partition={}, offset={}): {}",
+                appendHeadersHeader,
+                record.topic(),
+                record.kafkaPartition(),
+                getOffset(record),
+                e.getMessage());
+            return null;
+        }
+    }
+
+    private String readNonBlankConfig(
+            Map<String, ?> configs, String configName, String defaultValue) {
+        Object rawValue = configs.get(configName);
+        String value = rawValue == null ? defaultValue : rawValue.toString().trim();
+        if (value.isEmpty()) {
+            throw new ConfigException(configName, rawValue, "Value must not be blank");
+        }
+        return value;
+    }
+
+    private int readPositiveIntConfig(
+            Map<String, ?> configs, String configName, int defaultValue) {
+        Object rawValue = configs.get(configName);
+        if (rawValue == null) {
+            return defaultValue;
+        }
+
+        final int value;
+        try {
+            value = rawValue instanceof Number
+                ? ((Number) rawValue).intValue()
+                : Integer.parseInt(rawValue.toString().trim());
+        } catch (NumberFormatException e) {
+            throw new ConfigException(configName, rawValue, "Value must be a positive integer");
+        }
+        if (value < 1) {
+            throw new ConfigException(configName, rawValue, "Value must be at least 1");
+        }
+        return value;
+    }
     /**
      * Resolve target Iceberg table for a topic. Append mode requires an explicit
      * mapping; CDC mode retains the namespace/topic fallback for compatibility.

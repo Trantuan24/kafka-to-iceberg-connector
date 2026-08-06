@@ -66,29 +66,40 @@ docker exec iceberg-kafka-connect-demo-trino-1 trino --execute "SELECT 1"    # T
 
 ---
 
-## Append mode (mặc định)
+## Append mode (API push)
 
-**Mục đích:** ingest message thô (JSON hoặc XML) — mỗi message → **1 dòng**, lưu nguyên văn vào cột `record`. Không dedup, không version (append-only, at-least-once).
+**Muc dich:** moi Kafka message duoc append thanh mot dong landing. Kafka value duoc luu nguyen ven vao `data`; SMT khong parse JSON/XML, khong CDC va khong dedup theo business key.
 
-- `value.converter = StringConverter` → message giữ nguyên dạng chuỗi
-- SMT `mode=append` sinh đúng **3 cột**: `id` (= `topic-partition-offset`), `record` (raw body), `ngay_cap_nhat` (`Instant.now()`)
-- 1 topic = 1 định dạng (giống thực tế: 1 API endpoint → 1 topic → 1 format)
+SMT tao 9 cot:
 
-### Chạy nhanh (E2E tự động)
+- `loainguon`: config, mac dinh `api_push`
+- `manguondulieu`: `topic-partition-offset`
+- `sukien`: `null`
+- `phienban`: version contract landing, mac dinh `1`
+- `body`: Kafka header `api.body`, khong bat buoc
+- `header`: Kafka header `api.headers` sau khi loc allowlist an toan
+- `data`: toan bo raw Kafka value
+- `ingest_date`, `ingest_time`: cung mot thoi diem xu ly, mac dinh mui gio `Asia/Ho_Chi_Minh`
 
-Script `run_append_e2e.ps1` làm trọn gói: build JAR → rebuild image → đợi Connect → tạo table → deploy connector → gửi test → verify.
+Chi `content-type`, `accept`, `user-agent`, `x-request-id`, `x-correlation-id` va `traceparent` duoc luu. `Authorization`, cookie, API/access/secret key khong bao gio duoc ghi vao bang.
+
+Chi tiet contract va rollout: `docs/append-api-push-plan.md`.
+
+### Chay nhanh (E2E tu dong)
+
+Script `run_append_e2e.ps1` build JAR, rebuild Connect, tao bang v2, deploy connector, gui test va verify:
 
 ```powershell
 .\run_append_e2e.ps1
 ```
 
-### Chạy thủ công
+### Chay thu cong
 
-**1. Tạo table (3 cột):**
+**1. Tao bang truoc khi deploy connector:**
 
 ```powershell
 docker exec iceberg-kafka-connect-demo-trino-1 trino --execute "CREATE SCHEMA IF NOT EXISTS iceberg.def"
-docker exec iceberg-kafka-connect-demo-trino-1 trino --execute "CREATE TABLE IF NOT EXISTS iceberg.def.abc_append (id VARCHAR, record VARCHAR, ngay_cap_nhat VARCHAR) WITH (format = 'PARQUET')"
+docker exec iceberg-kafka-connect-demo-trino-1 trino --execute "CREATE TABLE IF NOT EXISTS iceberg.def.abc_append_v2 (loainguon VARCHAR, manguondulieu VARCHAR, sukien VARCHAR, phienban INTEGER, body VARCHAR, header VARCHAR, data VARCHAR, ingest_date DATE, ingest_time TIMESTAMP(3)) WITH (format = 'PARQUET')"
 ```
 
 **2. Deploy connector:**
@@ -99,35 +110,37 @@ Invoke-RestMethod -Method Post "http://localhost:8083/connectors" -ContentType "
 Invoke-RestMethod "http://localhost:8083/connectors/sink-qtmt-append/status" | ConvertTo-Json -Depth 3
 ```
 
-**3. Gửi message test:**
+**3. Gui message test:**
 
 ```powershell
-python test_append.py            # 1 message JSON  (sample_new.json)
-python test_append.py xml        # 1 message XML   (sample_new.xml, cần topic + table riêng)
-python test_append_multi.py      # 9 message / 3 batch -> ép >=3 commit (test snapshot/checkpoint)
+python test_append.py
+python test_append_multi.py
 ```
 
-**4. Verify (đợi ~15s):**
+Producer gui raw value va co the them hai Kafka headers UTF-8: `api.body` va `api.headers`. Request `--data ''` khong co tham so nghiep vu se cho `body = null`; raw Kafka value rong van duoc giu la `data = ''`.
+
+**4. Verify sau chu ky commit:**
 
 ```powershell
 docker cp query-append.sql iceberg-kafka-connect-demo-trino-1:/tmp/q.sql
 docker exec iceberg-kafka-connect-demo-trino-1 trino -f /tmp/q.sql
 ```
 
-Mong đợi: số dòng = số message đã gửi, mỗi snapshot có metadata lineage (`consumer.connectorname`, `consumer.ingest.time`...).
-
-### Config append (`configs/sink.qtmt_append.json`)
-
-Điểm khác CDC:
+### Config append
 
 ```jsonc
-"transforms.customCdc.mode": "append",                          // bật append
-"transforms.customCdc.topic.table.map": "qtmt-append:def.abc_append",
-"value.converter": "org.apache.kafka.connect.storage.StringConverter",  // raw passthrough
-"key.converter":   "org.apache.kafka.connect.storage.StringConverter"
-// KHÔNG có iceberg.tables.cdc-field, KHÔNG có iceberg.tables.default-id-columns
+"iceberg.tables.auto-create-enabled": "false",
+"iceberg.tables.evolve-schema-enabled": "false",
+"transforms.customCdc.mode": "append",
+"transforms.customCdc.topic.table.map": "qtmt-append:def.abc_append_v2",
+"transforms.customCdc.append.source.type": "api_push",
+"transforms.customCdc.append.schema.version": "1",
+"transforms.customCdc.append.timezone": "Asia/Ho_Chi_Minh",
+"transforms.customCdc.append.body.header": "api.body",
+"transforms.customCdc.append.headers.header": "api.headers",
+"value.converter": "org.apache.kafka.connect.storage.StringConverter",
+"header.converter": "org.apache.kafka.connect.storage.StringConverter"
 ```
-
 ---
 
 ## CDC mode
@@ -227,7 +240,7 @@ docker compose down -v        # reset hoàn toàn (xóa volumes)
 
 ```
 ├── configs/
-│   ├── sink.qtmt_append.json            # ★ Append connector (qtmt-append → def.abc_append)
+│   ├── sink.qtmt_append.json            # ★ Append connector (qtmt-append → def.abc_append_v2)
 │   └── sink.qtmt_tramquantrac.json      #   CDC connector    (qtmt-tramquantrac → def.abc)
 │
 ├── custom-smt/                          # [SOURCE] SMT CustomCDCTransform (build ra JAR)

@@ -1,52 +1,63 @@
 """
-Test APPEND mode: 1 TOPIC = 1 DINH DANG
-========================================
-- value.converter = StringConverter => message gui di la RAW STRING
-- SMT mode=append: nhet toan bo body vao cot `record`, sinh `id` + `ngay_cap_nhat`
-- Dich: chi 3 cot: id, record, ngay_cap_nhat
+Test APPEND API-push contract: one topic carries one raw data format.
 
-Moi topic chi mang 1 dinh dang (giong thuc te: 1 API endpoint -> 1 topic -> 1 format):
-  - qtmt-append      : JSON   (sample_new.json)
-  - qtmt-append-xml  : XML    (sample_new.xml)   [optional, can connector + table rieng]
-
-Chon FORMAT muon test ben duoi.
+Kafka value is the exact payload written to `data` by StringConverter.
+Optional API metadata is propagated through Kafka headers:
+  - api.body: API parameters/body metadata JSON
+  - api.headers: HTTP headers JSON; SMT keeps only the safe allowlist
 """
 from kafka import KafkaProducer
-import time
+import json
 import sys
+import time
 
-# StringConverter => gui raw string bytes (KHONG json.dumps)
 producer = KafkaProducer(
-    bootstrap_servers=['localhost:29092'],
-    value_serializer=lambda v: v.encode('utf-8')
+    bootstrap_servers=["localhost:29092"],
+    value_serializer=lambda value: value.encode("utf-8"),
 )
 
-# Chon dinh dang: "json" -> topic qtmt-append ; "xml" -> topic qtmt-append-xml
-FORMAT = sys.argv[1] if len(sys.argv) > 1 else "json"
-
-if FORMAT == "xml":
-    TOPIC = "qtmt-append-xml"
-    with open("sample_new.xml", "r", encoding="utf-8") as f:
-        payload = f.read()
+format_name = sys.argv[1] if len(sys.argv) > 1 else "json"
+if format_name == "xml":
+    topic = "qtmt-append-xml"
+    filename = "sample_new.xml"
 else:
-    TOPIC = "qtmt-append"
-    with open("sample_new.json", "r", encoding="utf-8") as f:
-        payload = f.read()
+    topic = "qtmt-append"
+    filename = "sample_new.json"
+
+with open(filename, "r", encoding="utf-8") as source_file:
+    payload = source_file.read()
+
+api_body = json.dumps(
+    {"tuNgay": "2026-07-30", "denNgay": "2026-08-07"},
+    ensure_ascii=False,
+).encode("utf-8")
+api_headers = json.dumps(
+    {
+        "Content-Type": "application/json",
+        "X-Request-ID": "append-manual-test",
+        "Authorization": "Basic must-not-land",
+    }
+).encode("utf-8")
 
 print("=" * 60)
-print(f"APPEND TEST | format={FORMAT} | topic={TOPIC}")
+print(f"APPEND TEST | format={format_name} | topic={topic}")
 print("=" * 60)
-
-producer.send(TOPIC, value=payload)
+producer.send(
+    topic,
+    value=payload,
+    headers=[("api.body", api_body), ("api.headers", api_headers)],
+)
 producer.flush()
-print(f"  SENT {FORMAT} payload ({len(payload)} chars)")
-
-print("\n  >>> Doi 15s cho connector commit...\n")
+print(f"SENT {format_name} payload ({len(payload)} chars)")
+print("Waiting 15s for connector commit...")
 time.sleep(15)
 
 print("DONE - 1 message sent")
-print(f"""
-VERIFY (3 cot: id, record, ngay_cap_nhat):
-  docker exec iceberg-kafka-connect-demo-trino-1 trino --execute "SELECT id, substr(record,1,40) AS record_head, ngay_cap_nhat FROM iceberg.def.abc_append ORDER BY id"
-""")
+print(
+    "VERIFY:\n"
+    "  docker exec iceberg-kafka-connect-demo-trino-1 trino --execute "
+    '"SELECT loainguon, manguondulieu, phienban, body, header, '
+    "substr(data,1,40), ingest_date, ingest_time "
+    'FROM iceberg.def.abc_append_v2 ORDER BY manguondulieu"'
+)
 producer.close()

@@ -1,49 +1,73 @@
 """
-Test APPEND mode - NHIEU MESSAGE qua NHIEU CHU KY COMMIT (checkpoint)
-=====================================================================
-- 1 topic = 1 format (JSON), value.converter=StringConverter
-- commit.interval-ms = 10000 (10s) => gui cac batch cach nhau >10s
-  de ep connector commit NHIEU LAN => sinh NHIEU SNAPSHOT.
+Test APPEND mode across multiple commit cycles.
 
-Thiet ke: 3 BATCH x 3 message = 9 message, nghi 13s giua cac batch.
-Ky vong: >= 3 snapshot (moi batch it nhat 1 commit) + 9 rows.
+Sends 3 batches x 3 raw JSON messages. Each record also carries optional API
+metadata via Kafka headers so body/header mapping is exercised end to end.
 """
 from kafka import KafkaProducer
-import time
 import json
+import time
 
 producer = KafkaProducer(
-    bootstrap_servers=['localhost:29092'],
-    value_serializer=lambda v: v.encode('utf-8')   # raw string (StringConverter)
+    bootstrap_servers=["localhost:29092"],
+    value_serializer=lambda value: value.encode("utf-8"),
 )
 
 TOPIC = "qtmt-append"
 BATCHES = 3
 PER_BATCH = 3
-SLEEP_BETWEEN = 13   # > commit.interval (10s) => moi batch 1 commit rieng
+SLEEP_BETWEEN = 13
 
-def make_payload(batch, idx):
-    # Moi message la 1 JSON array tho (giong sample_new.json)
-    n = batch * 10 + idx
-    return json.dumps([
-        {"MaTram": f"TRAM{n:03d}", "TenTram": f"Tram {n}", "LoaiHinhQuanTrac": "KHONGKHI",
-         "TenTinh": "Ha Noi", "ThongSo": "SO2, NO2", "batch": batch}
-    ], ensure_ascii=False)
+
+def make_payload(batch, index):
+    number = batch * 10 + index
+    return json.dumps(
+        [
+            {
+                "MaTram": f"TRAM{number:03d}",
+                "TenTram": f"Tram {number}",
+                "LoaiHinhQuanTrac": "KHONGKHI",
+                "TenTinh": "Ha Noi",
+                "ThongSo": "SO2, NO2",
+                "batch": batch,
+            }
+        ],
+        ensure_ascii=False,
+    )
+
+
+def metadata_headers(batch, index):
+    body = json.dumps(
+        {"batch": batch, "requestIndex": index}, ensure_ascii=False
+    ).encode("utf-8")
+    headers = json.dumps(
+        {
+            "Content-Type": "application/json",
+            "X-Correlation-ID": f"batch-{batch}-item-{index}",
+            "Authorization": "Basic must-not-land",
+        }
+    ).encode("utf-8")
+    return [("api.body", body), ("api.headers", headers)]
+
 
 total = 0
-for b in range(1, BATCHES + 1):
-    print(f"=== BATCH {b}/{BATCHES} ===")
-    for i in range(1, PER_BATCH + 1):
-        payload = make_payload(b, i)
-        producer.send(TOPIC, value=payload)
+for batch in range(1, BATCHES + 1):
+    print(f"=== BATCH {batch}/{BATCHES} ===")
+    for index in range(1, PER_BATCH + 1):
+        payload = make_payload(batch, index)
+        producer.send(
+            TOPIC,
+            value=payload,
+            headers=metadata_headers(batch, index),
+        )
         total += 1
-        print(f"  sent msg {i} ({len(payload)} chars)")
+        print(f"  sent msg {index} ({len(payload)} chars)")
     producer.flush()
-    if b < BATCHES:
-        print(f"  >>> nghi {SLEEP_BETWEEN}s de ep commit rieng...\n")
+    if batch < BATCHES:
+        print(f"  waiting {SLEEP_BETWEEN}s for a separate commit...\n")
         time.sleep(SLEEP_BETWEEN)
 
-print(f"\n  >>> doi them 15s cho commit cuoi...\n")
+print("waiting 15s for final commit...")
 time.sleep(15)
-print(f"DONE - da gui {total} message qua {BATCHES} batch")
+print(f"DONE - sent {total} messages across {BATCHES} batches")
 producer.close()
